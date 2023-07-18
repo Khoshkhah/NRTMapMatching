@@ -76,7 +76,12 @@ def polygonOffsetWithMinimumDistanceToPoint(point, polygon):
     if offsetlist[minindex] > distance2d(s[minindex],s[minindex+1]):
         return("errrror")
     #print(offset+distance2d(s[minindex],s[minindex+1]))
-    return offsetlist[minindex] + offset
+    u = offsetlist[minindex]
+    d = distance2d(s[minindex], s[minindex+1])
+    p1 = s[minindex]
+    p2 = s[minindex+1]
+    offsetposition = (((1-u/d)*p1[0]+(u/d)*p2[0]), ((1-u/d)*p1[1]+(u/d)*p2[1]))
+    return offsetlist[minindex] + offset, offsetposition
         
 
 def offsetBearing(polygon, offset):

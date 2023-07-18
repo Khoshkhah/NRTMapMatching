@@ -74,6 +74,12 @@ class Edge:
     def getLength(self):
         return self.length
     
+    def getToNode(self):
+        return self.tonode
+    
+    def getFromNode(self):
+        return self.fromnode
+    
     def getBoundingBox(self):
         return geotools.getBoundingBox(self.shape)
     
