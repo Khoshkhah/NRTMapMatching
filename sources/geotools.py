@@ -1,6 +1,13 @@
 
 import math
 import numpy as np
+import pandas as pd
+
+
+def dfPoint2LonLat(df, net):
+    df["lon"] = df.apply(lambda row: net.convertXY2LonLat([row["x"], row['y']])[0], axis=1)
+    df["lat"] = df.apply(lambda row: net.convertXY2LonLat([row["x"], row['y']])[1], axis=1)
+    return df.drop(columns=["point"])
 
 def distance2d(point1, point2):
     """

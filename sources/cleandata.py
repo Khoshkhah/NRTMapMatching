@@ -93,5 +93,7 @@ def xystop_point_editing(df):
     df_y = df.groupby("stopindex")["y"].apply(np.median)
     df['x'] = df.apply(lambda row: df_x[row.stopindex] if row.stopindex > 0 else row.x, axis=1)
     df['y'] = df.apply(lambda row: df_y[row.stopindex] if row.stopindex > 0 else row.y, axis=1)
+    #df["point"] = df.apply(lambda row: (row.x, row.y), axis=1)
+    #df = df.drop(columns=["x", "y"])
 
     return df
