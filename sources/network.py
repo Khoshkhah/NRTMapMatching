@@ -197,7 +197,7 @@ class Net:
 #################3  end of the network class   #########################
 ########################################################################
 
-def combineRawShapesSumo(edge, fromedge=None, edge_reverse=False, from_reverse =False):
+def combineShapesSumo(edge, fromedge=None, edge_reverse=False, from_reverse =False):
     """
     Combines the raw shapes of Sumo edges, optionally considering the starting point from another edge.
 
@@ -217,16 +217,16 @@ def combineRawShapesSumo(edge, fromedge=None, edge_reverse=False, from_reverse =
 
     if fromedge is not None:
         if from_reverse==False or edge_reverse==False:
-            p = fromedge.getRawShape()[-1]
+            p = fromedge.getShape()[-1]
         else:
-            p = fromedge.getRawShape()[0]
+            p = fromedge.getShape()[0]
 
         if p != shape[0]:
             shape = [p] + shape
 
     return shape
 
-def getRawShape(edge, net, edge_reverse=False, from_reverse =False, fromedge=None):
+def getShape(edge, net, fromedge=None, edge_reverse=False, from_reverse =False):
     """
     Retrieves the raw shape of an edge and converts it to a LineString geometry.
 
@@ -240,7 +240,7 @@ def getRawShape(edge, net, edge_reverse=False, from_reverse =False, fromedge=Non
 
     """
     _shape = list()
-    for point in combineRawShapesSumo(edge, fromedge, edge_reverse, from_reverse):
+    for point in combineShapesSumo(edge, fromedge=fromedge, edge_reverse=edge_reverse, from_reverse=from_reverse):
         _shape.append(net.convertXY2LonLat(point[0], point[1]))
     return LineString(_shape)
 
