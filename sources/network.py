@@ -226,7 +226,7 @@ def combineShapesSumo(edge, fromedge=None, edge_reverse=False, from_reverse =Fal
 
     return shape
 
-def getShape(edge, fromedge=None, edge_reverse=False, from_reverse =False):
+def getShape(edge, net, fromedge=None, edge_reverse=False, from_reverse =False):
     """
     Retrieves the raw shape of an edge and converts it to a LineString geometry.
 
