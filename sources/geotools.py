@@ -1,5 +1,6 @@
 
 import math
+import numpy as np
 
 def distance2d(point1, point2):
     """
@@ -20,6 +21,15 @@ def polyLength(polygon):
     return sum([distance2d(a, b) for a, b in zip(polygon[:-1], polygon[1:])])
 
 
+def distancePointToLine(point, line):
+    offset, dist = lineOffsetWithMinimumDistanceToPoint(point, *(line))
+    return dist
+
+def distancePointToPolygon(point, polygon):
+    mindist = np.inf
+    for i in range(len(polygon) - 1):
+         mindist = np.min(mindist, distancePointToLine(point, polygon[i]))
+    return mindist
 
 def lineOffsetWithMinimumDistanceToPoint(point, line_start_point, line_end_point):
     """Return the offset from line (line_start, line_end) and distance from the point to that point
@@ -77,6 +87,7 @@ def offsetBearing(polygon, offset):
     sum = 0
 
     if offset > polyLength(polygon):
+        #polygon = coordlist
         # Check if offset is greater than polygon length
         print(f"offset = {offset}, polygon length = {polyLength(polygon)}")
         raise ValueError("offset is greater than polygon length.")
@@ -144,3 +155,14 @@ def road_distance(currentedge, currentoffset, lastedge , lastoffset, lastedgelen
     return w
 
 
+def getBoundingBox(coordList):
+    minX = 1e400
+    minY = 1e400
+    maxX = -1e400
+    maxY = -1e400
+    for x, y in coordList:
+        minX = min(x, minX)
+        minY = min(y, minY)
+        maxX = max(x, maxX)
+        maxY = max(y, maxY)
+    return minX, minY, maxX, maxY
