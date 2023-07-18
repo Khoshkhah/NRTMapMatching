@@ -210,7 +210,7 @@ def combineShapesSumo(edge, fromedge=None, edge_reverse=False, from_reverse =Fal
 
     """
          
-    shape = edge.getRawShape()
+    shape = edge.getShape()
     if edge_reverse==True:
         shape = list(reversed(shape))
 
