@@ -1,5 +1,6 @@
 import pandas as pd
-import distance2d from geotools
+from geotools import distance2d 
+import numpy as np
 
 # Two consecutive stop lables consider as a one stop and the location is somewhere between two tops
 # stopindex=0 it means "moving"
@@ -77,7 +78,7 @@ def cleaningData(obs, net,id=0, MINSPEED_FOR_BEARING=1, MAX_SPEED_FOR_OUTLIER=10
 
 
 def xystop_point_editing(df):
-     """
+    """
     set the same 'x' and 'y' based on median to every consecutive point with stop lable
     Args:
         df (pandas.DataFrame): columns = {'id', lon','lat', 'timestamp', 'speed', 'bearing', 'stopindex'}.
