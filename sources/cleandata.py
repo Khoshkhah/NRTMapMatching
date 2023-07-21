@@ -95,8 +95,8 @@ def xystop_point_editing(df):
     df['y'] = df.apply(lambda row: df_y[row.stopindex] if row.stopindex > 0 else row.y, axis=1)
     #df["point"] = df.apply(lambda row: (row.x, row.y), axis=1)
     #df = df.drop(columns=["x", "y"])
-
     return df
+
 
 def removeOutlier(obs, MAX_SPEED_FOR_OUTLIER = 50):
     
@@ -106,7 +106,6 @@ def removeOutlier(obs, MAX_SPEED_FOR_OUTLIER = 50):
     timestamp_previous = row_previous["timestamp"]
     output.append({"x":point_previous[0], 'y':point_previous[1], 'timestamp':int(timestamp_previous)})
 
-    
     for index in range(1,len(obs)):
         row_current = obs.iloc[index]
         point_current = (row_current["x"],row_current["y"])
@@ -121,12 +120,12 @@ def removeOutlier(obs, MAX_SPEED_FOR_OUTLIER = 50):
     
     return pd.DataFrame(output)
 
+
+
 def smoothingPoint(obs, alpha=.7, type="local"): #type in {"local", "aggregated"}
     
     df2 = obs.join(obs.shift(-1).rename(columns={"timestamp":"timestamp2","x":"x2","y":"y2"}))
     df2.at[df2.index[-1],"timestamp2"] = df2.iloc[-1]["timestamp"] + 1
-    #df2.at[df2.index[-1],"x2"] = df2.iloc[-1]["x"]
-    #df2.at[df2.index[-1],"y2"] = df2.iloc[-1]["y"]
     df2["dtime"] = df2.apply(lambda row: int(row["timestamp2"] - row["timestamp"]), axis=1)
     
     df2["vx"]=df2.apply(lambda row: (row.x2 - row.x)/row.dtime, axis =1)
@@ -147,12 +146,20 @@ def smoothingPoint(obs, alpha=.7, type="local"): #type in {"local", "aggregated"
         # need to complete it
     return df3
 
+
+# clean and add speed and bearing to the data
+# 1 - convert to x, y
+# 2 - remove outlier
+# 3 - smoothing vx and vy and update x,y
+# 4 - calculate bearing and speed
+# 5 - assing zero to speeds less than MINSPEED_FOR_MOVING
+# 6 - update bearings based on speeds less than MINSPEED_FOR_BEARING
+# 7 - assing stopindex and fix locations in stop cases
+
 def richdata(obs, net, id=0, alpha=.7, type="local", MIN_SPEED=1, MAX_SPEED_FOR_OUTLIER=50, MINSPEED_FOR_BEARING = 2):
     df = dfLonLat2XY(obs, net)
     df1 = removeOutlier(df)
     df2 = smoothingPoint(df1, alpha=alpha, type=type)
-    #df2 = smoothingPoint(df2, alpha=alpha, type=type)
-
     
     output = []
     row_current = df2.iloc[0]
