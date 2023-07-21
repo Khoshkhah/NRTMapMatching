@@ -5,9 +5,14 @@ import pandas as pd
 
 
 def dfPoint2LonLat(df, net):
-    df["lon"] = df.apply(lambda row: net.convertXY2LonLat([row["x"], row['y']])[0], axis=1)
-    df["lat"] = df.apply(lambda row: net.convertXY2LonLat([row["x"], row['y']])[1], axis=1)
-    return df.drop(columns=["point"])
+    df["lon"] = df.apply(lambda row: net.convertXY2LonLat(row["x"], row['y'])[0], axis=1)
+    df["lat"] = df.apply(lambda row: net.convertXY2LonLat(row["x"], row['y'])[1], axis=1)
+    return df.drop(columns=["x","y"])
+
+def dfLonLat2XY(df, net):
+    df["x"] = df.apply(lambda row: net.convertLonLat2XY(row["lon"], row['lat'])[0], axis=1)
+    df["y"] = df.apply(lambda row: net.convertLonLat2XY(row["lon"], row['lat'])[1], axis=1)
+    return df.drop(columns=["lon","lat"])
 
 def distance2d(point1, point2):
     """
