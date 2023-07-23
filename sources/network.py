@@ -6,7 +6,10 @@ from shapely.geometry import LineString
 import time
 import numpy as np
 import geotools
-import rtree 
+import rtree
+import pyproj
+import osmnx as ox
+
 
 #########  class Node  #####################
 
@@ -93,7 +96,7 @@ class Net:
         self.edges = dict()
         self.nodes = dict()
         self.geoproj = None
-        self._location = None
+        self._location = dict()
         self._rtree = None
         self._edgeidlist = []
 
@@ -155,6 +158,101 @@ class Net:
         
         self._edgeidlist = list(self.edges.keys())
         self._rtree = self._initRTree()
+
+
+    def importFromOSM(self, osmfile):
+        import pyrosm
+        import networkx as nx
+        from geotools import calculateUTMZone
+        
+
+        # create networkx graph from osm
+        osm = pyrosm.OSM(osmfile)
+        nodes, edges= osm.get_network(network_type="driving", nodes=True)
+        G = osm.to_graph(nodes, edges, graph_type="networkx")
+        #G = nx.classes.digraph.DiGraph(G)
+
+        # set self._location and self.geoproj
+        minlon = nodes["lon"].min()-.1
+        maxlon = nodes["lon"].max()+.1
+        minlat = nodes["lat"].min()-.1
+        maxlat = nodes["lat"].max()+.1
+        zone = calculateUTMZone(minlon, maxlon, minlat, maxlat)
+        self._location["projParameter"] = f"+proj=utm +zone={zone} +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+        self._location["origBoundary"] = f"{minlon},{minlat},{maxlon},{maxlat}"
+        
+        self.geoproj = pyproj.Proj(self._location["projParameter"])#,preserve_units=True)
+        x1,y1 = self.geoproj(minlon, minlat)
+        x2,y2 = self.geoproj(maxlon, maxlat)
+
+        self._location["convBoundary"] = f"{0},{0},{x2-x1},{y2-y1}"
+        self._location["netOffset"] = f"{-x1},{-y1}"
+
+        #graph simplification
+        G = ox.simplify_graph(G)
+       
+
+        # create dictionary for nodes
+        for node in G.nodes():
+            p = G.nodes[node]["geometry"]
+            lon = p.coords.xy[0][0]
+            lat = p.coords.xy[0][0]
+            x,y = self.convertLonLat2XY(lon,lat)
+            n = Node(id=node, coord=(x,y))
+            self.nodes[node] = n
+
+        # create dictionary for edges
+        for edge in G.edges:
+            espeed  = G.edges[edge[0],edge[1],0]["maxspeed"]
+            if(isinstance(espeed,list)):
+                espeed = None #max([int(s) if s!=None else 30 for s in espeed])
+            else:
+                espeed = float(espeed) if espeed !=None else None
+            G.edges[edge[0],edge[1],0]["maxspeed"] = espeed
+
+        G = ox.add_edge_speeds(G)
+       # G = ox.add_edge_travel_times(G)
+        for edge in G.edges:
+            eid = f"{edge[0]}_{edge[1]}"
+            efromnode = self.nodes[edge[0]]
+            etonode   = self.nodes[edge[1]]
+            espeed    = G.edges[edge]["speed_kph"]*1000/3600 #km/h to m/s
+            geometry = G.edges[edge]["geometry"]
+            eshape = []
+            for point in geometry.coords:
+                eshape.append(self.convertLonLat2XY(*point))   
+            elength = geotools.polyLength(eshape)
+            e  = Edge(id=eid, fromnode=efromnode, tonode=etonode,
+                            speed=espeed, length=elength, shape=eshape)
+            self.edges[eid] = e
+
+
+
+        for nodeid in self.nodes.keys():
+            node = self.nodes[nodeid]
+            for item in G.out_edges(nodeid):
+                edgeid = f"{item[0]}_{item[1]}"
+                node.addOutgoing(self.edges[edgeid])
+            for item in G.in_edges(nodeid):
+                edgeid = f"{item[0]}_{item[1]}"
+                node.addIncoming(self.edges[edgeid])
+
+        for edgeid in self.edges.keys():
+            edge = self.edges[edgeid]
+            fromnode = edge.getFromNode()
+            tonode = edge.getToNode()
+            
+            for item in tonode.getOutgoing():
+                edge.addOutgoing(self.edges[item.getID()])
+
+            for item in fromnode.getIncoming():
+                edge.addIncoming(self.edges[item.getID()])
+
+        self._edgeidlist = list(self.edges.keys())
+        self._rtree = self._initRTree()
+
+        self.G = G
+
 
 
     def getLocationOffset(self):
