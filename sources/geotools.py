@@ -2,7 +2,20 @@
 import math
 import numpy as np
 import pandas as pd
+#from shapely.geometry import LineString,Point
 
+def calculateUTMZone(min_lon, max_lon, min_lat, max_lat):
+    # Calculate the center of the bounding box
+    center_lon = (min_lon + max_lon) / 2.0
+
+    # Determine the UTM zone based on the center's longitude
+    utm_zone = int((center_lon + 180.0) / 6.0) + 1
+
+    # Handle special cases near the international date line
+    if utm_zone == 60 and center_lon < 0:
+        utm_zone = 1
+
+    return utm_zone
 
 def dfPoint2LonLat(df, net):
     df["lon"] = df.apply(lambda row: net.convertXY2LonLat(row["x"], row['y'])[0], axis=1)
