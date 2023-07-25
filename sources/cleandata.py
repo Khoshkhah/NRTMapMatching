@@ -19,6 +19,11 @@ def cleaningData(obs, net,id=0, MINSPEED_FOR_BEARING=1, MAX_SPEED_FOR_OUTLIER=10
         print(f"missed the columns : {missedcols}")
         return 0
 
+    if len(obs) < 2:
+        print("observations is too small!")
+        return 0
+    obs = obs.sort_values("timestamp")
+    obs = obs.groupby("timestamp").last().reset_index()
     output = []
     row_current = obs.iloc[0]
     point_current = net.convertLonLat2XY(row_current["lon"],row_current["lat"])
