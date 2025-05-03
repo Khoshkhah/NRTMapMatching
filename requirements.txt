@@ -1,0 +1,7 @@
+pandas
+numpy
+sumolib
+shapely
+rtree
+pyproj
+osmnx
