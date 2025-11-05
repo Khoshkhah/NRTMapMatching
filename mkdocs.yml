@@ -3,7 +3,7 @@ site_description: Near Real-time Map Matching Library Documentation
 site_author: NRTMapMatching Contributors
 
 repo_name: NRTMapMatching
-repo_url: https://github.com/YOUR_USERNAME/NRTMapMatching
+repo_url: https://github.com/khoshkhah/NRTMapMatching
 edit_uri: edit/main/docs/
 
 theme:
@@ -67,5 +67,5 @@ plugins:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/YOUR_USERNAME/NRTMapMatching
+      link: https://github.com/khoshkhah/NRTMapMatching
 
