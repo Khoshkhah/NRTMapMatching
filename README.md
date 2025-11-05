@@ -56,7 +56,7 @@ if matcher.match(interpolated) == 1:
 
 ## Documentation
 
-📖 **Full documentation available at: [https://khoshkhah.github.io/NRTMapMatching](https://khoshkhah.github.io/NRTMapMatching)**
+**Full documentation available at: [https://khoshkhah.github.io/NRTMapMatching](https://khoshkhah.github.io/NRTMapMatching)**
 
 The documentation includes:
 - [Installation Guide](docs/installation.md)
