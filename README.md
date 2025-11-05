@@ -99,8 +99,8 @@ If you use this library in your research, please cite:
 ```bibtex
 @software{nrtmapmatching,
   title = {NRTMapMatching: Near Real-time Map Matching},
-  author = {[Your Name]},
-  year = {[Year]},
+  author = {[Kaveh Khoshkhah]},
+  year = {[2023]},
   url = {https://github.com/khoshkhah/NRTMapMatching}
 }
 ```
