@@ -7,13 +7,13 @@ A Python library for matching GPS trajectory data to road network edges in near 
 
 ## Features
 
-- 🗺️ **Road Network Support**: Import networks from SUMO .net files or OpenStreetMap (OSM) files
-- 🧹 **GPS Data Cleaning**: Remove outliers and smooth trajectories
-- 📊 **Data Enrichment**: Enhance GPS data with speed and bearing calculations
-- 📈 **Trajectory Interpolation**: Interpolate trajectories using cubic Bezier curves
-- 🎯 **Map Matching**: Match GPS points to road network edges using multi-factor cost function
-- ⚡ **Spatial Indexing**: Efficient edge queries using R-tree spatial indexing
-- 🛑 **Stop Detection**: Automatic detection and handling of vehicle stops
+-  **Road Network Support**: Import networks from SUMO .net files or OpenStreetMap (OSM) files
+-  **GPS Data Cleaning**: Remove outliers and smooth trajectories
+-  **Data Enrichment**: Enhance GPS data with speed and bearing calculations
+-  **Trajectory Interpolation**: Interpolate trajectories using cubic Bezier curves
+-  **Map Matching**: Match GPS points to road network edges using multi-factor cost function
+-  **Spatial Indexing**: Efficient edge queries using R-tree spatial indexing
+-  **Stop Detection**: Automatic detection and handling of vehicle stops
 
 ## Quick Start
 
