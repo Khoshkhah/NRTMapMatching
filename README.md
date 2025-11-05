@@ -109,18 +109,3 @@ If you use this library in your research, please cite:
 
 [Add your license here - e.g., MIT, Apache 2.0, etc.]
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Authors
-
-[Your Name] - [your.email@example.com]
-
-## Acknowledgments
-
-[Add any acknowledgments here]
-
-## Support
-
-For issues, questions, or contributions, please open an issue on the [GitHub repository](https://github.com/khoshkhah/NRTMapMatching).
