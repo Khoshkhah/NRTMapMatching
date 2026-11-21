@@ -47,9 +47,7 @@ def main(n):
                 row[("interpolate", eng)], ip = timed(lambda: interpolateTrajectory(c, engine=eng))
                 m = MapMatcher(net, engine=eng)
                 row[("match", eng)], ok = timed(lambda: m.match(ip))
-                if not ok:
-                    raise RuntimeError
-        except Exception:  # the matcher fails on this trip (both engines): skip it
+        except Exception:  # a stage before the match fails on this trip: skip it
             continue
         tr = ip.reset_index(drop=True)
         cols = [tr[c].astype(float).tolist() for c in ("x", "y", "speed", "bearing")]

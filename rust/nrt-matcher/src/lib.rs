@@ -118,7 +118,7 @@ impl Network {
     }
 }
 
-/// `MapMatcher.match`: `match_trace` for a full trace, `push` for one new point (online use).
+/// `MapMatcher.match` (beam search): `match_trace` for a full trace, `push` for one new point (online use).
 #[pyclass]
 struct Matcher(c::Matcher);
 
@@ -126,7 +126,7 @@ struct Matcher(c::Matcher);
 impl Matcher {
     #[new]
     #[pyo3(signature = (network, max_gps_error, max_map_error, map_one_way_fix, u_turn_on_oneway, loop_,
-                        diff_gps_error, max_running_time=5.0, path=Vec::new()))]
+                        diff_gps_error, beam_width=5))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         network: &Network,
@@ -136,9 +136,11 @@ impl Matcher {
         u_turn_on_oneway: bool,
         loop_: bool,
         diff_gps_error: f64,
-        max_running_time: f64,
-        path: Vec<(usize, bool, f64)>,
-    ) -> Self {
+        beam_width: usize,
+    ) -> PyResult<Self> {
+        if beam_width == 0 {
+            return Err(err("beam_width must be 1 or more".into()));
+        }
         let p = c::Params {
             max_gps_error,
             max_map_error,
@@ -146,14 +148,12 @@ impl Matcher {
             u_turn_on_oneway,
             loop_,
             diff_gps_error,
-            max_running_time,
+            beam_width,
         };
-        let path = path.into_iter().map(|(edge, rev, len)| c::PathItem { edge, rev, len }).collect();
-        Matcher(c::Matcher::new(Arc::clone(&network.0), p, path))
+        Ok(Matcher(c::Matcher::new(Arc::clone(&network.0), p)))
     }
 
-    /// Match a full trace. `labels` is the DataFrame index. Returns 1. At `max_running_time` the
-    /// match stops and keeps the path found so far (see `timed_out`).
+    /// Match a full trace. `labels` is the DataFrame index. Returns 1.
     fn match_trace(
         &mut self,
         py: Python<'_>,
@@ -163,40 +163,38 @@ impl Matcher {
         speed: Vec<f64>,
         bearing: Vec<f64>,
     ) -> PyResult<i32> {
-        let pts = (0..x.len())
+        let n = x.len();
+        if labels.len() != n || y.len() != n || speed.len() != n || bearing.len() != n {
+            return Err(err("the point arrays do not agree".into()));
+        }
+        let pts = (0..n)
             .map(|i| c::Pt { label: labels[i], x: x[i], y: y[i], speed: speed[i], bearing: bearing[i] })
             .collect();
         let m = &mut self.0;
-        let s = py.detach(|| m.match_trace(pts)).map_err(err)?;
-        Ok((s == c::Status::Done) as i32)
+        py.detach(|| m.match_trace(pts)).map_err(err)?;
+        Ok(1)
     }
 
-    /// Add one point and match it. Returns the number of matched points.
-    fn push(&mut self, x: f64, y: f64, speed: f64, bearing: f64) -> PyResult<i64> {
+    /// Add one point and match it. Returns the number of matched points of the best hypothesis.
+    fn push(&mut self, x: f64, y: f64, speed: f64, bearing: f64) -> PyResult<usize> {
         self.0.push(x, y, speed, bearing).map_err(err)?;
-        Ok(self.0.matched.len() as i64)
+        Ok(self.0.matched_len())
     }
 
-    /// True when the last `match_trace` stopped at `max_running_time`.
-    #[getter]
-    fn timed_out(&self) -> bool {
-        self.0.timed_out
-    }
-
-    /// The edge index of the last matched point, or None.
+    /// The edge index of the last matched point of the best hypothesis, or None.
     fn last_edge(&self) -> Option<usize> {
-        self.0.matched.last().map(|m| m.edge)
+        self.0.last_edge()
     }
 
-    /// The path as [(edge index, reverse, length)].
+    /// The path of the best hypothesis as [(edge index, reverse, length)].
     fn path(&self) -> Vec<(usize, bool, f64)> {
-        self.0.path.iter().map(|p| (p.edge, p.rev, p.len)).collect()
+        self.0.path().iter().map(|p| (p.edge, p.rev, p.len)).collect()
     }
 
-    /// The matched points as columns. `pos` is the input row; `from_edge` is -1 for none;
-    /// `decision` is 0 STAY, 1 CHANGE, 2 NODECISION.
+    /// The matched points of the best hypothesis as columns. `pos` is the input row; `from_edge`
+    /// is -1 for none; `decision` is 0 STAY, 1 CHANGE, 2 NODECISION.
     fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let m = &self.0.matched;
+        let m = self.0.matched();
         let d = PyDict::new(py);
         macro_rules! col {
             ($name:literal, $f:expr) => {

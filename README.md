@@ -66,30 +66,46 @@ pip install ./rust/nrt-matcher
 
 The Python API does not change. When the module `nrt_matcher` is installed, the functions use it. Otherwise they use the Python code. To select the engine, set the argument `engine` (`"auto"`, `"rust"` or `"python"`) of these functions and of `MapMatcher`, or set the environment variable `NRT_ENGINE`.
 
-For online use, `nrt_matcher.Matcher.push(x, y, speed, bearing)` matches one new point and continues the match from the points before it (see `test/test_rust_engine.py`).
+For online use, `nrt_matcher.Matcher.push(x, y, speed, bearing)` matches one new point (see `test/test_rust_engine.py`). It gives the same result as the full trace.
 
-**Equal results.** `test/test_rust_engine.py` runs both engines on trips of `data/gps_inside_island.zip`. On 400 trips (282,656 matched points), all four stages give the same rows. Each point gets the same edge, and the largest difference in a number is 4e-12. The test does not compare the 17 trips that stop at `MAX_RUNNING_TIME`, because in the same time the Rust engine goes further than the Python code. At an exact cost tie (76 of the 400 trips), the Python code takes the first edge in a Python set, and that sequence can change from one run to the next. The Rust engine takes the edge with the lowest index. The test gives the Python code the same tie rule.
+### The matcher: a beam search (since 2026-11-21)
 
-**Matcher faults fixed** (2026-11-21, the same in both engines; the test has one test for each fault):
+`MapMatcher.match` keeps at most `BEAM_WIDTH` hypotheses (default 5). A hypothesis is a path, its last matched point and its total cost. For each point, the matcher extends each hypothesis to its candidate edges: stay on the edge, change to an outgoing edge, or both. The speed and the rest of the edge select the candidates. The cost of a candidate is the cost of the old matcher (bearing, distance, air distance, road distance, reverse direction). The matcher does not use a candidate that is farther than `MAX_GPS_ERROR + MAX_MAP_ERROR` from the point. The `BEAM_WIDTH` children with the lowest total cost stay, at most one for each edge and direction. If no hypothesis can continue, the match starts again from the edges near the point. If no edge is near the point, the matcher skips the point. The result is the hypothesis with the lowest total cost.
 
-- A step back that removed the full path raised `IndexError: pop from empty list`. Now an empty path is not popped. When no decision point is left, the match starts again at the current point (before, `match` returned 0).
-- The time limit was a fixed 10 s, and at the limit `match` returned 0. Now the limit is `MAX_RUNNING_TIME` (default 5 s). At the limit, `match` returns 1 with the path found so far, and `timed_out` is `True`.
-- A point with no candidate edge (a dead end, or no edge near the point) raised `ValueError: ... ln(edges)==0`. Now the match starts again at that point. If no edge is near the point, the matcher skips it (a gap).
-- `reset()` did not clear the path. `match()` wrote `new_sample.csv` into the current folder and printed the path many times. Now it does this only with `MapMatcher(..., debug=True)`.
+The old matcher kept a full tree of decision points and stepped back when a point was too far from the edge. It had these faults, which the beam search does not have (one test for each fault in `test/test_rust_engine.py`):
 
-On a trace with no fault that takes less than 5 s, the result does not change.
+- A step back could remove the full path and then raise `IndexError: pop from empty list`.
+- The path could get more edges after each step back, up to hundreds of thousands of edges on a long trace.
+- The search had a fixed 10 s limit, and at the limit `match` returned 0. The beam search does a fixed maximum of work for each point, so it has no time limit (`MAX_RUNNING_TIME` is not used).
+- A point with no candidate edge raised `ValueError: ... ln(edges)==0`.
+- At an exact cost tie, the old matcher took the first edge in a Python set, so the result could change from one run to the next. The beam search uses the sequence of `Net._edgeidlist`.
 
-**Speed** (`python test/bench_rust_engine.py 200`, Apple M6, 150 trips that match, 100,282 points at 1 s):
+Also, `reset()` clears the path, and `match()` writes `new_sample.csv` and prints the path only with `MapMatcher(..., debug=True)`.
+
+**Equal results.** `test/test_rust_engine.py` runs both engines on trips of `data/gps_inside_island.zip`. On 400 trips (304,743 matched points), all four stages give the same rows. Each point gets the same edge, and the largest difference in a number is 4e-12. Each point of each trip has a match.
+
+**Monaco test** (600 simulated traces on 50 routes, intervals 1, 5, 15 and 30 s, GPS noise 3, 10 and 20 m; both engines give the same path on all 600 traces):
+
+| Interval | Recall, old → beam | Precision, old → beam | No route, old → beam |
+|---|---|---|---|
+| 1 s | 0.28 → 0.95 | 0.33 → 0.91 | 61 % → 0 % |
+| 5 s | 0.23 → 0.89 | 0.26 → 0.90 | 68 % → 0 % |
+| 15 s | 0.20 → 0.65 | 0.22 → 0.74 | 71 % → 0 % |
+| 30 s | 0.06 → 0.42 | 0.07 → 0.56 | 87 % → 0 % |
+
+The matcher moves at most one edge for each interpolated 1 s point, so its scores are lower at long intervals.
+
+**Speed** (`python test/bench_rust_engine.py 200`, Apple M6, 200 trips, 143,826 points at 1 s):
 
 | Stage | Python, ms per trip | Rust, ms per trip | Faster by |
 |---|---:|---:|---:|
-| `cleaningData` | 5.7 | 0.74 | 8× |
-| `richdata` | 14.3 | 1.8 | 8× |
-| `interpolateTrajectory` | 35.1 | 0.52 | 68× |
-| `MapMatcher.match` | 26.6 | 1.8 | 14× |
-| Rust matcher only (`Matcher.match_trace`) | | 0.075 | 355× |
+| `cleaningData` | 6.0 | 0.81 | 7× |
+| `richdata` | 15.6 | 2.0 | 8× |
+| `interpolateTrajectory` | 36.6 | 0.53 | 69× |
+| `MapMatcher.match` | 108.0 | 1.3 | 81× |
+| Rust matcher only (`Matcher.match_trace`) | | 0.42 | 256× |
 
-The time for each new point: Python 49 µs (the trace time divided by the points), Rust `push` 0.17 µs (median), 0.5 µs (p99). Most of the Rust time in `MapMatcher.match` is the file `new_sample.csv` that `match()` writes for each trace. In `cleaningData` and `richdata`, most of the Rust time is the pandas steps and the projection, which stay in Python.
+The time for each new point: Python 181 µs (the trace time divided by the points), Rust `push` 1.7 µs (median), 7.5 µs (p99), 100 µs (maximum). In `cleaningData` and `richdata`, most of the Rust time is the pandas steps and the projection, which stay in Python.
 
 ## Documentation
 

@@ -4,13 +4,13 @@ This document describes the algorithms used in NRTMapMatching.
 
 ## Map Matching Algorithm
 
-The map matching algorithm uses a greedy approach with backtracking to match GPS points to road network edges.
+The map matching algorithm is a beam search (since 2026-11-21). It keeps at most `BEAM_WIDTH` hypotheses (default 5). A hypothesis is a path, its last matched point and its total cost.
 
 ### Overview
 
 1. **Initial Matching**: Find candidate edges within search radius for the first GPS point
-2. **Iterative Matching**: For each subsequent GPS point, determine the best matching edge
-3. **Backtracking**: If match quality is poor, backtrack to previous decision point
+2. **Iterative Matching**: For each subsequent GPS point, extend each hypothesis to its candidate edges
+3. **Selection**: Keep the `BEAM_WIDTH` children with the lowest total cost, at most one for each edge and direction
 4. **Cost Calculation**: Multi-factor cost function for edge selection
 
 ### Step-by-Step Process
@@ -20,11 +20,11 @@ The map matching algorithm uses a greedy approach with backtracking to match GPS
 For the first GPS point:
 - Calculate search radius: `radius = MAX_GPS_ERROR + MAX_MAP_ERROR`
 - Find all edges within radius using R-tree spatial index
-- Store candidate edges for initial matching
+- Each candidate edge becomes a hypothesis
 
 #### 2. Decision Making
 
-For each GPS point, the algorithm makes one of three decisions:
+For each GPS point and each hypothesis, the algorithm makes one of three decisions:
 
 - **STAY**: Vehicle remains on current edge
   - Condition: Remaining edge length >= (max_speed × time) + GPS error
@@ -61,20 +61,17 @@ cost += 100000  # Large penalty for reverse direction
 - **Air Distance Error**: Difference between GPS distance and matched distance (meters)
 - **Road Distance Error**: Difference between predicted distance (speed × time) and actual road distance (meters)
 
-#### 4. Edge Selection
+#### 4. Selection
 
-- Select candidate edge with minimum cost
-- Verify match quality: distance < search radius
-- If quality is poor, backtrack to previous decision point
+- Do not use a candidate whose distance to the GPS point is more than the search radius
+- The total cost of a child is the total cost of its hypothesis plus the cost of the candidate
+- Sort the children by total cost (at a tie, the sequence of the edge indexes stays)
+- Keep the first `BEAM_WIDTH` children, at most one for each edge and direction
+- The result is the hypothesis with the lowest total cost after the last point
 
-#### 5. Backtracking
+#### 5. No candidate
 
-If match quality is poor (distance > radius):
-1. Remove current edge from candidate list
-2. Pop decision from decision list
-3. Remove edge from path
-4. Return to previous GPS point
-5. Try alternative candidate edges
+If no hypothesis has a candidate within the search radius (for example at a dead end), the match starts again from the edges near the GPS point. The path found before stays. If no edge is near the GPS point, the algorithm skips the point (a gap).
 
 #### 6. Edge Transition Handling
 
@@ -109,9 +106,8 @@ Typical values:
 ### Performance Optimizations
 
 1. **Spatial Indexing**: R-tree for efficient edge queries
-2. **Early Termination**: Maximum running time limit
-3. **Backtracking Limit**: Prevents infinite loops
-4. **Edge Caching**: Reuses edge shape calculations
+2. **Fixed work for each point**: at most `BEAM_WIDTH` hypotheses, each with its candidate edges. Thus no time limit is necessary, and the online use (one point at a time) has a short maximum time for each point
+3. **Shared paths**: the hypotheses share the first parts of their paths (linked lists)
 
 ## Bezier Interpolation Algorithm
 
@@ -242,7 +238,7 @@ Stops are detected and handled:
 - **Map Matching**: O(n × m × k) where:
   - n = number of GPS points
   - m = average number of candidate edges per point
-  - k = average number of backtracking steps
+  - k = `BEAM_WIDTH`
 
 - **Interpolation**: O(n × s) where:
   - n = number of GPS points
@@ -256,15 +252,12 @@ Stops are detected and handled:
   - e = number of edges
   - n = number of nodes
 
-- **Matching State**: O(d) where:
-  - d = depth of decision tree
+- **Matching State**: O(n × k): the shared paths and matched points of the hypotheses
 
 ### Optimization Strategies
 
 1. **Spatial Indexing**: R-tree for O(log n) edge queries
-2. **Early Termination**: Maximum running time limit
-3. **Backtracking Limit**: Prevents excessive backtracking
-4. **Edge Caching**: Reuses shape calculations
+2. **Beam search**: a fixed maximum of work for each point
 
 ## Limitations
 

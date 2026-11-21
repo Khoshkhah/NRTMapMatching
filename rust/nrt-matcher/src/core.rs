@@ -8,7 +8,6 @@
 use rstar::primitives::{GeomWithData, Rectangle};
 use rstar::{RTree, AABB};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 pub type P = [f64; 2];
 
@@ -595,7 +594,7 @@ impl Network {
 }
 
 // ---------------------------------------------------------------------------------------------
-// MapMatcher.match (mapmatching.py)
+// MapMatcher.match (mapmatching.py): a beam search
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -606,12 +605,11 @@ pub struct Params {
     pub u_turn_on_oneway: bool,
     pub loop_: bool,
     pub diff_gps_error: f64,
-    /// `MAX_RUNNING_TIME` in seconds. `match_trace` stops at this limit and keeps the path found so
-    /// far; `push` stops its step back at this limit and continues it at the next push.
-    pub max_running_time: f64,
+    /// The number of hypotheses that the matcher keeps (`BEAM_WIDTH`).
+    pub beam_width: usize,
 }
 
-/// One GPS point of the input. `label` is the DataFrame index label (Python mixes it with the position).
+/// One GPS point of the input. `label` is the DataFrame index label.
 #[derive(Clone, Copy, Debug)]
 pub struct Pt {
     pub label: i64,
@@ -659,13 +657,7 @@ pub struct Matched {
     pub cost: f64,
 }
 
-/// A decision point: the edges not yet tried, each with its "reverse" flag (sorted by edge).
-struct Branch {
-    index: i64,
-    result: Vec<(usize, bool)>,
-    last_edge: Option<usize>,
-}
-
+/// Insert into a set of (edge, reverse) sorted by edge; an edge already there gets the new flag.
 fn set_insert(v: &mut Vec<(usize, bool)>, e: usize, rev: bool) {
     match v.binary_search_by_key(&e, |c| c.0) {
         Ok(i) => v[i].1 = rev,
@@ -673,14 +665,38 @@ fn set_insert(v: &mut Vec<(usize, bool)>, e: usize, rev: bool) {
     }
 }
 
-fn set_remove(v: &mut Vec<(usize, bool)>, e: usize) -> bool {
-    match v.binary_search_by_key(&e, |c| c.0) {
-        Ok(i) => {
-            v.remove(i);
-            true
-        }
-        Err(_) => false,
-    }
+/// A hypothesis of the beam search. `path` and `matched` point into the node lists of the matcher
+/// (linked lists: the hypotheses share their first parts).
+#[derive(Clone, Copy, Debug)]
+struct Hyp {
+    cost: f64,
+    edge: Option<usize>,
+    rev: bool,
+    offset: f64,
+    path: Option<usize>,
+    matched: Option<usize>,
+}
+
+struct PNode {
+    item: PathItem,
+    prev: Option<usize>,
+}
+
+struct MNode {
+    m: Matched,
+    prev: Option<usize>,
+}
+
+/// A child before it goes into the beam: a new path item is made only for the children that stay.
+struct Child {
+    cost: f64,
+    edge: usize,
+    rev: bool,
+    offset: f64,
+    path: Option<usize>,
+    new_item: Option<PathItem>,
+    m: Matched,
+    prev_m: Option<usize>,
 }
 
 /// `Done` after `match_trace`; `Running` while `push` adds points.
@@ -690,44 +706,28 @@ pub enum Status {
     Done,
 }
 
-enum Step {
-    Accept(i64),
-    Back(i64),
-}
-
 /// The state of `MapMatcher.match`. `match_trace` runs it on a full trace; `push` adds one point
-/// and continues it (the online use).
+/// (the online use). Both give the same result.
 pub struct Matcher {
     net: Arc<Network>,
     p: Params,
-    pub path: Vec<PathItem>,
     pts: Vec<Pt>,
-    branches: Vec<Branch>,
-    pub matched: Vec<Matched>,
-    myindex: i64,
-    last_edge: Option<usize>,
-    last_offset: f64,
-    last_rev: bool,
+    beam: Vec<Hyp>,
+    pnodes: Vec<PNode>,
+    mnodes: Vec<MNode>,
     pub status: Status,
-    /// True when the last `match_trace` stopped at `max_running_time` (the path is only a part).
-    pub timed_out: bool,
 }
 
 impl Matcher {
-    pub fn new(net: Arc<Network>, p: Params, path: Vec<PathItem>) -> Self {
+    pub fn new(net: Arc<Network>, p: Params) -> Self {
         Matcher {
             net,
             p,
-            path,
             pts: Vec::new(),
-            branches: Vec::new(),
-            matched: Vec::new(),
-            myindex: 0,
-            last_edge: None,
-            last_offset: 0.0,
-            last_rev: false,
+            beam: Vec::new(),
+            pnodes: Vec::new(),
+            mnodes: Vec::new(),
             status: Status::Running,
-            timed_out: false,
         }
     }
 
@@ -737,174 +737,197 @@ impl Matcher {
 
     /// `MapMatcher.match(sample_gps)` on the full trace.
     pub fn match_trace(&mut self, pts: Vec<Pt>) -> Result<Status, String> {
-        self.pts = pts;
-        self.start();
-        self.run(true)?;
+        *self = Matcher::new(Arc::clone(&self.net), self.p);
+        for pt in pts {
+            self.pts.push(pt);
+            self.step(self.pts.len() - 1)?;
+        }
+        self.status = Status::Done;
         Ok(self.status)
     }
 
-    /// Add one point and match it (and again the points after a step back). The labels are the positions.
-    /// The result equals `match_trace` on the same points, except when a step back occurs at the
-    /// last point of the trace: there the Python code stops, and `push` continues.
+    /// Add one point and match it. The label of the point is its position.
     pub fn push(&mut self, x: f64, y: f64, speed: f64, bearing: f64) -> Result<Status, String> {
         let label = self.pts.len() as i64;
         self.pts.push(Pt { label, x, y, speed, bearing });
-        if self.pts.len() == 1 {
-            self.start();
-        }
-        if self.status == Status::Running {
-            self.run(false)?;
-        }
+        self.step(self.pts.len() - 1)?;
         Ok(self.status)
     }
 
-    fn start(&mut self) {
-        self.branches = vec![self.start_branch(0, 0)];
-        self.myindex = 0;
-        self.last_edge = None;
-        self.status = Status::Running;
-        self.timed_out = false;
-    }
-
-    /// `first_point_matching`: a decision point at the point `pos` with the edges near it.
-    fn start_branch(&self, pos: usize, index: i64) -> Branch {
-        let p = self.pts[pos];
-        let result = self.net.neighboring_edges(p.x, p.y, self.radius()).into_iter().map(|(e, _)| (e, false)).collect();
-        Branch { index, result, last_edge: None }
-    }
-
-    fn run(&mut self, batch: bool) -> Result<(), String> {
-        let n = self.pts.len() as i64;
-        let t0 = Instant::now();
-        while self.myindex < n {
-            let mut label = -1;
-            let mut broke = false;
-            for pos in self.myindex as usize..n as usize {
-                label = self.pts[pos].label;
-                match self.step(pos)? {
-                    Step::Accept(l) => self.myindex = l,
-                    Step::Back(i) => {
-                        self.myindex = i;
-                        broke = true;
-                        break;
-                    }
-                }
-            }
-            if batch {
-                if label == n - 1 {
-                    self.myindex = label + 1;
-                }
-            } else if !broke {
-                self.myindex = n;
-            }
-            if t0.elapsed() > Duration::from_secs_f64(self.p.max_running_time) {
-                if batch {
-                    self.timed_out = true;
-                    self.status = Status::Done;
-                }
-                return Ok(());
-            }
+    /// The matched points of the best hypothesis, first to last.
+    pub fn matched(&self) -> Vec<Matched> {
+        let mut v = Vec::new();
+        let mut n = self.beam.first().and_then(|h| h.matched);
+        while let Some(i) = n {
+            v.push(self.mnodes[i].m);
+            n = self.mnodes[i].prev;
         }
-        if batch {
-            self.status = Status::Done;
-        }
-        Ok(())
+        v.reverse();
+        v
     }
 
-    /// `MapMatcher.outgoinglist(edge, reverse)`.
-    fn outgoing(&self, e: usize, rev: bool) -> Vec<(usize, bool)> {
+    /// The path of the best hypothesis, first to last.
+    pub fn path(&self) -> Vec<PathItem> {
+        self.path_of(self.beam.first().and_then(|h| h.path))
+    }
+
+    /// The number of matched points of the best hypothesis.
+    pub fn matched_len(&self) -> usize {
+        let mut k = 0;
+        let mut n = self.beam.first().and_then(|h| h.matched);
+        while let Some(i) = n {
+            k += 1;
+            n = self.mnodes[i].prev;
+        }
+        k
+    }
+
+    /// The edge of the last matched point of the best hypothesis.
+    pub fn last_edge(&self) -> Option<usize> {
+        self.beam.first().and_then(|h| h.edge)
+    }
+
+    fn path_of(&self, mut n: Option<usize>) -> Vec<PathItem> {
+        let mut v = Vec::new();
+        while let Some(i) = n {
+            v.push(self.pnodes[i].item);
+            n = self.pnodes[i].prev;
+        }
+        v.reverse();
+        v
+    }
+
+    /// `MapMatcher.outgoinglist(edge, reverse, path)`.
+    fn outgoing(&self, e: usize, rev: bool, path: Option<usize>) -> Vec<(usize, bool)> {
         let net = &*self.net;
         let mut v: Vec<(usize, bool)> = Vec::new();
+        let node = if self.p.map_one_way_fix && rev { net.from[e] } else { net.to[e] };
+        let mut out: Vec<usize> = net.node_out[node].clone();
         if self.p.map_one_way_fix {
-            let node = if rev { net.from[e] } else { net.to[e] };
-            let mut out: Vec<usize> = net.node_out[node].iter().chain(net.node_in[node].iter()).copied().collect();
+            out.extend(net.node_in[node].iter().copied());
             if !self.p.u_turn_on_oneway {
                 if let Some(i) = out.iter().position(|&c| c == e) {
                     out.remove(i);
                 }
             }
-            if !self.p.loop_ {
-                for it in &self.path {
-                    if let Some(i) = out.iter().position(|&c| c == it.edge) {
-                        out.remove(i);
-                    }
+        }
+        if !self.p.loop_ {
+            for it in self.path_of(path) {
+                if let Some(i) = out.iter().position(|&c| c == it.edge) {
+                    out.remove(i);
                 }
             }
-            for c in out {
-                set_insert(&mut v, c, !net.node_out[node].contains(&c));
-            }
-        } else {
-            // the Python code has no LOOP=False here (NameError); the binding does not come here then
-            for &c in &net.node_out[net.to[e]] {
-                set_insert(&mut v, c, false);
-            }
+        }
+        for c in out {
+            let r = self.p.map_one_way_fix && !net.node_out[node].contains(&c);
+            set_insert(&mut v, c, r);
         }
         v
     }
 
-    fn step(&mut self, pos: usize) -> Result<Step, String> {
+    /// `MapMatcher.step`: one point of the beam search.
+    fn step(&mut self, pos: usize) -> Result<(), String> {
         let net_arc = Arc::clone(&self.net);
         let net = &*net_arc;
         let pt = self.pts[pos];
-        if self.last_edge != self.branches.last().unwrap().last_edge {
-            return Err("error in the algorithm".into());
-        }
-        let (mut edges, decision) = match self.last_edge {
-            Some(le) => {
-                let remind = self.path.last().ok_or("list index out of range")?.len - self.last_offset;
-                let maxspeed = net.speed[le];
-                let d = if remind < (pt.speed * 1.0) - self.p.diff_gps_error {
-                    Decision::Change
-                } else if remind >= (maxspeed * 1.0) + self.p.diff_gps_error {
-                    Decision::Stay
-                } else {
-                    Decision::NoDecision
-                };
-                let e = match d {
-                    Decision::Stay => vec![(le, self.last_rev)],
-                    Decision::Change => self.outgoing(le, self.last_rev),
-                    Decision::NoDecision => {
-                        let mut e = self.outgoing(le, self.last_rev);
-                        set_insert(&mut e, le, self.last_rev);
-                        e
-                    }
-                };
-                (e, d)
-            }
-            None => (self.branches.last().unwrap().result.clone(), Decision::Change),
-        };
-        if edges.is_empty() {
-            // no candidate edge (a dead end, or no edge near the point): the match starts again at
-            // this point. The path found before stays. Without an edge near the point, skip it.
-            let b = self.start_branch(pos, pt.label);
-            edges = b.result.clone();
-            self.branches = vec![b];
-            self.last_edge = None;
-            self.last_rev = false;
-            if edges.is_empty() {
-                return Ok(Step::Accept(pt.label));
-            }
-        }
-
-        let xy = [pt.x, pt.y];
-        let mut best: Option<Matched> = None;
-        for &(e, rev) in &edges {
-            let (temp, temp_rev) = if Some(e) != self.last_edge && self.last_edge.is_some() {
-                (self.last_edge, self.last_rev)
-            } else if self.path.len() < 2 {
-                (None, false)
+        let mut children: Vec<Child> = Vec::new();
+        for h in self.beam.clone() {
+            let le = h.edge.expect("a hypothesis in the beam has an edge");
+            let last = &self.pnodes[h.path.expect("a hypothesis in the beam has a path")].item;
+            let remind = last.len - h.offset;
+            let d = if remind < (pt.speed * 1.0) - self.p.diff_gps_error {
+                Decision::Change
+            } else if remind >= (net.speed[le] * 1.0) + self.p.diff_gps_error {
+                Decision::Stay
             } else {
-                let it = self.path[self.path.len() - 2];
-                (Some(it.edge), it.rev)
+                Decision::NoDecision
+            };
+            let edges = match d {
+                Decision::Stay => vec![(le, h.rev)],
+                Decision::Change => self.outgoing(le, h.rev, h.path),
+                Decision::NoDecision => {
+                    let mut e = self.outgoing(le, h.rev, h.path);
+                    set_insert(&mut e, le, h.rev);
+                    e
+                }
+            };
+            self.extend(&h, pos, d, &edges, &mut children)?;
+        }
+        if children.is_empty() {
+            // no hypothesis can continue: start again from the edges near the point (a gap)
+            let base = self.beam.first().copied();
+            let start = Hyp {
+                cost: base.map_or(0.0, |b| b.cost),
+                edge: None,
+                rev: false,
+                offset: 0.0,
+                path: base.and_then(|b| b.path),
+                matched: base.and_then(|b| b.matched),
+            };
+            let edges: Vec<(usize, bool)> =
+                net.neighboring_edges(pt.x, pt.y, self.radius()).into_iter().map(|(e, _)| (e, false)).collect();
+            self.extend(&start, pos, Decision::Change, &edges, &mut children)?;
+            if children.is_empty() {
+                return Ok(()); // no edge near the point: skip it
+            }
+        }
+        children.sort_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(std::cmp::Ordering::Equal));
+        let mut beam: Vec<Hyp> = Vec::with_capacity(self.p.beam_width);
+        for c in children {
+            if beam.iter().any(|b| b.edge == Some(c.edge) && b.rev == c.rev) {
+                continue;
+            }
+            let path = match c.new_item {
+                Some(item) => {
+                    self.pnodes.push(PNode { item, prev: c.path });
+                    Some(self.pnodes.len() - 1)
+                }
+                None => c.path,
+            };
+            self.mnodes.push(MNode { m: c.m, prev: c.prev_m });
+            beam.push(Hyp {
+                cost: c.cost,
+                edge: Some(c.edge),
+                rev: c.rev,
+                offset: c.offset,
+                path,
+                matched: Some(self.mnodes.len() - 1),
+            });
+            if beam.len() == self.p.beam_width {
+                break;
+            }
+        }
+        self.beam = beam;
+        Ok(())
+    }
+
+    /// `MapMatcher._extend`: the children of `h` on the candidate edges (sorted by edge index).
+    fn extend(&self, h: &Hyp, pos: usize, decision: Decision, edges: &[(usize, bool)], out: &mut Vec<Child>) -> Result<(), String> {
+        let net = &*self.net;
+        let pt = self.pts[pos];
+        let xy = [pt.x, pt.y];
+        let last_path = h.path.map(|i| self.pnodes[i].item);
+        let prev_path = h.path.and_then(|i| self.pnodes[i].prev).map(|i| self.pnodes[i].item);
+        let last_m = h.matched.map(|i| self.mnodes[i].m);
+        for &(e, rev) in edges {
+            let (temp, temp_rev) = if h.edge.is_some() && Some(e) != h.edge {
+                (h.edge, h.rev)
+            } else if let (Some(_), Some(pp)) = (h.edge, prev_path) {
+                (Some(pp.edge), pp.rev) // stay: the edge before it
+            } else {
+                (None, false)
             };
             let shape = net.combine(e, temp, rev, temp_rev);
             let length = poly_len(&shape);
             let (offset, mp) = poly_offset(xy, &shape);
             let d = dist(mp, xy);
+            if d > self.radius() {
+                continue;
+            }
             let mb = offset_bearing(&shape, offset)?;
             let ad = (pt.bearing - mb).abs();
             let db = if 360.0 - ad < ad { 360.0 - ad } else { ad };
-            let (lastedge, lastoffset, last_sample, last_matched, last_len) = match self.matched.last() {
+            let (lastedge, lastoffset, last_sample, last_matched, last_len) = match last_m {
                 Some(m) => {
                     let q = self.pts[m.pos];
                     (m.edge, m.offset, [q.x, q.y], [m.x, m.y], m.edge_length)
@@ -922,8 +945,20 @@ impl Matcher {
             let rd = (mrd - predict).abs();
             let mut cost = if rev { 100000.0 } else { 0.0 };
             cost += 1.0 * db + 30.0 * d + 10.0 * cost_air + 5.0 * rd;
-            if best.map_or(true, |b| cost < b.cost) {
-                best = Some(Matched {
+            let new_item = if Some(e) == h.edge {
+                None
+            } else {
+                let len = poly_len(&net.combine(e, last_path.map(|p| p.edge), rev, last_path.is_some_and(|p| p.rev)));
+                Some(PathItem { edge: e, rev, len })
+            };
+            out.push(Child {
+                cost: h.cost + cost,
+                edge: e,
+                rev,
+                offset,
+                path: h.path,
+                new_item,
+                m: Matched {
                     pos,
                     label: pt.label,
                     x: mp[0],
@@ -943,66 +978,10 @@ impl Matcher {
                     edge_rev: rev,
                     from_rev: temp_rev,
                     cost,
-                });
-            }
+                },
+                prev_m: h.matched,
+            });
         }
-        let b = best.unwrap();
-
-        if b.dist > self.radius() {
-            // back to the last decision point that has an edge not yet tried
-            set_remove(&mut self.branches.last_mut().unwrap().result, b.edge);
-            let mut counter = 0;
-            while self.branches.last().is_some_and(|br| br.result.is_empty()) {
-                counter += 1;
-                self.branches.pop();
-                self.path.pop();
-            }
-            if counter == 0 {
-                self.path.pop();
-            }
-            if self.branches.is_empty() {
-                // no decision point is left: the match starts again at this point
-                let b = self.start_branch(pos, pt.label);
-                self.branches.push(b);
-            }
-            let top = self.branches.last_mut().unwrap();
-            top.last_edge = None;
-            let back = top.index;
-            while self.matched.last().is_some_and(|m| m.label >= back) {
-                self.matched.pop();
-            }
-            self.last_edge = None;
-            self.last_rev = false;
-            return Ok(Step::Back(back));
-        }
-
-        self.last_offset = b.offset;
-        self.matched.push(b);
-        let from = self.path.last().map_or((None, false), |it| (Some(it.edge), it.rev));
-        if self.last_edge.is_none() {
-            let top = self.branches.last_mut().unwrap();
-            top.last_edge = Some(b.edge);
-            if !set_remove(&mut top.result, b.edge) {
-                return Err("KeyError".into());
-            }
-            let len = poly_len(&net.combine(b.edge, from.0, b.edge_rev, from.1));
-            self.path.push(PathItem { edge: b.edge, rev: b.edge_rev, len });
-            self.last_edge = Some(b.edge);
-            self.last_rev = b.edge_rev;
-        } else if Some(b.edge) == self.last_edge {
-            // stay on the edge
-        } else {
-            set_remove(&mut edges, self.last_edge.unwrap());
-            set_remove(&mut edges, b.edge);
-            let len = poly_len(&net.combine(b.edge, from.0, b.edge_rev, from.1));
-            self.path.push(PathItem { edge: b.edge, rev: b.edge_rev, len });
-            self.last_edge = Some(b.edge);
-            self.last_rev = b.edge_rev;
-            self.branches.push(Branch { index: pt.label, result: edges, last_edge: Some(b.edge) });
-        }
-        if self.last_edge != self.branches.last().unwrap().last_edge {
-            return Err("error 2 in the algorithm.".into());
-        }
-        Ok(Step::Accept(pt.label))
+        Ok(())
     }
 }

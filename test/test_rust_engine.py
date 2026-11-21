@@ -4,13 +4,9 @@ Each stage runs on real trips of data/gps_inside_island.zip on the network data/
 cleaningData, richdata, interpolateTrajectory and MapMatcher.match. The match must give the same
 edge for each point; the numbers must agree to a small tolerance.
 
-Ties: when two edges have exactly the same cost, the Python code takes the edge that comes first
-in a Python set. That sequence follows memory addresses, so it can change from one run to the next.
-The Rust engine takes the edge with the lowest index in Net._edgeidlist. So that the comparison is
-exact, the Python reference here takes the same edge at a tie (`tie_min`); the test counts the ties.
-
-MapMatcher.match writes
-new_sample.csv into the current folder, so the test runs in a temporary folder.
+The matcher is a beam search. At a cost tie, both engines keep the sequence of the edge indexes
+(Net._edgeidlist), so the result does not change from one run to the next. The test runs in a
+temporary folder, so that a file that a stage writes does not stay.
 
     pytest test/test_rust_engine.py              # 40 trips
     python test/test_rust_engine.py 400          # more trips, with a summary
@@ -82,21 +78,6 @@ def run(f):
             return None, f"{type(e).__name__}: {e}"
 
 
-def tie_min(net, ties):
-    """`min` for mapmatching.py: at a cost tie, the edge with the lowest index (the rule of the Rust engine)."""
-    index = {e: i for i, e in enumerate(net._edgeidlist)}
-
-    def m(*a, key=None):
-        if key is None:
-            return min(*a)
-        best = min(key(i) for i in a[0])
-        tied = [i for i in a[0] if key(i) == best]
-        if len(tied) > 1:
-            ties.append(tied[0]["timestamp"])
-        return min(tied, key=lambda i: index[i["edge"].getID()])
-    return m
-
-
 def compare_trip(net, s):
     """Run each stage with both engines. Returns {stage: difference text} for the stages that differ."""
     from cleandata import cleaningData, richdata
@@ -123,21 +104,11 @@ def compare_trip(net, s):
     out["interpolate"] = frames_equal(ip, ir)
 
     # both matchers read the same input: the Python interpolation
-    import mapmatching
     mp, mr = MapMatcher(net, engine="python"), MapMatcher(net, engine="rust")
-    ties = []
-    mapmatching.min = tie_min(net, ties)
-    try:
-        okp, ep = run(lambda: mp.match(ip.copy()))
-    finally:
-        del mapmatching.min
-    out["_ties"] = len(ties)
-    out["_failed"] = bool(ep) or not okp
+    okp, ep = run(lambda: mp.match(ip.copy()))
     okr, er = run(lambda: mr.match(ip.copy()))
-    if mp.timed_out or mr.timed_out:
-        # the Rust engine goes further in the same time: the parts of the path are not the same
-        out["_timeout"] = True
-    elif ep or er or okp != okr:
+    out["_failed"] = bool(ep) or not okp or len(mp.matchdf) == 0
+    if ep or er or okp != okr:
         out["match"] = f"result {okp!r}/{ep!r} != {okr!r}/{er!r}" if (ep, okp) != (er, okr) else ""
     elif okp:
         out["match"] = frames_equal(mp.matchdf, mr.matchdf)
@@ -147,7 +118,8 @@ def compare_trip(net, s):
             out["match"] = "path"
         out["_points"] = len(ip)
         num = [c for c in mp.matchdf.columns if c not in TEXT_COLS and mp.matchdf[c].dtype != object]
-        out["_maxdiff"] = float((mp.matchdf[num] - mr.matchdf[num]).abs().to_numpy().max())
+        if len(mp.matchdf):
+            out["_maxdiff"] = float((mp.matchdf[num] - mr.matchdf[num]).abs().to_numpy().max())
     return {k: v for k, v in out.items() if v}
 
 
@@ -178,17 +150,17 @@ def test_push_equals_match(data, tmp_path, monkeypatch):
     for t, s in trips(gps, 10):
         traj = interpolateTrajectory(cleaningData(s, net)).reset_index(drop=True)
         m = MapMatcher(net, engine="rust")
-        if not run(lambda: m.match(traj))[0]:
-            continue
+        m.match(traj)
         online = engine.rust.Matcher(rust_network(net), 60, 40, True, False, True, 10)
         for r in traj.itertuples():
             online.push(r.x, r.y, r.speed, r.bearing)
         ids = net._edgeidlist
         assert [ids[e] for e in online.result()["edge"]] == m.matchdf["edgeid"].tolist(), t
+        assert [(ids[e], r) for e, r, _l in online.path()] == [(p["edge"].getID(), p["reverse"]) for p in m.path], t
 
 
 # ---------------------------------------------------------------------------------------------
-# The faults of the old matcher (before 2026-11-21). Each test runs both engines.
+# The faults of the old backtracking matcher (before 2026-11-21). Each test runs both engines.
 # ---------------------------------------------------------------------------------------------
 
 def trip_points(data, trip):
@@ -205,8 +177,9 @@ def test_fault1_step_back_empties_the_path(data, tmp_path, monkeypatch, eng):
     monkeypatch.chdir(tmp_path)
     from mapmatching import MapMatcher
     m = MapMatcher(data[0], engine=eng)
-    assert m.match(trip_points(data, "14010000510061335_0")) == 1
-    assert len(m.matchdf) > 0 and len(m.path) > 0
+    pts = trip_points(data, "14010000510061335_0")
+    assert m.match(pts) == 1
+    assert len(m.matchdf) == len(pts) and 0 < len(m.path) < len(pts)
 
 
 @pytest.mark.parametrize("eng", ["python", "rust"])
@@ -215,19 +188,22 @@ def test_fault1_no_decision_point_left(data, tmp_path, monkeypatch, eng):
     monkeypatch.chdir(tmp_path)
     from mapmatching import MapMatcher
     m = MapMatcher(data[0], engine=eng)
-    assert m.match(trip_points(data, "14010000510073977_0")) == 1
-    assert len(m.matchdf) > 0 and len(m.path) > 0
+    pts = trip_points(data, "14010000510073977_0")
+    assert m.match(pts) == 1
+    assert len(m.matchdf) == len(pts) and 0 < len(m.path) < len(pts)
 
 
 @pytest.mark.parametrize("eng", ["python", "rust"])
-def test_fault2_time_limit(data, tmp_path, monkeypatch, eng):
-    """The old matcher had a fixed 10 s limit and returned 0 there. Now the limit is MAX_RUNNING_TIME,
-    and at the limit match returns 1 with the path found so far."""
+def test_fault2_no_time_limit(data, tmp_path, monkeypatch, eng):
+    """The old matcher had a fixed 10 s limit and returned 0 there. The beam search does a fixed
+    maximum of work for each point: no time limit. BEAM_WIDTH=1 keeps only the best hypothesis."""
     monkeypatch.chdir(tmp_path)
     from mapmatching import MapMatcher
-    m = MapMatcher(data[0], MAX_RUNNING_TIME=0, engine=eng)
-    assert m.match(trip_points(data, "14010000510073977_0")) == 1   # a trip with step backs
-    assert m.timed_out and len(m.matchdf) > 0
+    pts = trip_points(data, "14010000526351621_0")      # the old matcher stepped back many times here
+    for width in (1, 5):
+        m = MapMatcher(data[0], engine=eng, BEAM_WIDTH=width)
+        assert m.match(pts) == 1
+        assert len(m.matchdf) == len(pts) and 0 < len(m.path) < len(pts)
 
 
 @pytest.mark.parametrize("eng", ["python", "rust"])
@@ -243,7 +219,7 @@ def test_fault3_no_candidate_edge(data, tmp_path, monkeypatch, eng):
     assert pts.index[0] not in set(m.matchdf["index"]) and len(m.matchdf) == len(pts) - 1
 
 
-def test_engines_equal_after_fixes(data, tmp_path, monkeypatch):
+def test_engines_equal_fault_trips(data, tmp_path, monkeypatch):
     """The trips of the faults give the same matches in both engines."""
     monkeypatch.chdir(tmp_path)
     net, gps = data
@@ -268,16 +244,13 @@ if __name__ == "__main__":
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     net, gps = load()
     os.chdir(tempfile.mkdtemp())
-    stats = {"trips": 0, "points": 0, "trips with a tie": 0, "match fails (both engines)": 0,
-             "timed out (not compared)": 0, "max difference": 0.0}
+    stats = {"trips": 0, "points": 0, "no match (both engines)": 0, "max difference": 0.0}
     diffs = {}
     for t, s in trips(gps, n):
         d = compare_trip(net, s)
         stats["trips"] += 1
         stats["points"] += d.pop("_points", 0)
-        stats["trips with a tie"] += d.pop("_ties", 0) > 0
-        stats["match fails (both engines)"] += d.pop("_failed", False)
-        stats["timed out (not compared)"] += d.pop("_timeout", False)
+        stats["no match (both engines)"] += d.pop("_failed", False)
         stats["max difference"] = max(stats["max difference"], d.pop("_maxdiff", 0.0))
         for k, v in d.items():
             diffs.setdefault(k, []).append((t, v))

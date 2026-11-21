@@ -71,10 +71,15 @@ MapMatcher(net, MAX_GPS_ERROR=60, MAX_MAP_ERROR=40,
 - **Effect**: Larger values make decisions more conservative
 
 #### `MAX_RUNNING_TIME` (default: 5)
-- **Type**: float
-- **Units**: seconds
-- **Description**: Maximum running time for map matching algorithm.
-- **Note**: Algorithm will terminate if exceeded (returns 0)
+- **Note**: Not used since the beam search (2026-11-21): the matcher does a fixed maximum of work for each point.
+
+#### `BEAM_WIDTH` (default: 5)
+- **Type**: int
+- **Description**: The number of hypotheses that the beam search keeps. 1 keeps only the best hypothesis (a greedy match).
+
+#### `engine` (default: None) and `debug` (default: False)
+- **engine**: `"auto"`, `"rust"` or `"python"`; `None` uses the environment variable `NRT_ENGINE`, else `"auto"` (Rust when `nrt_matcher` is installed).
+- **debug**: `True` writes `new_sample.csv` and prints the path.
 
 ## Data Cleaning Parameters
 

@@ -1,7 +1,6 @@
 #import networkx as nx
 #import numpy as np
 import pandas as pd
-import time
 
 import network
 from network import combineShapesSumo,getGeoShape
@@ -30,6 +29,24 @@ def rust_network(net):
 
 
 
+class _Hyp:
+    """A hypothesis of the beam search. path = (edge, reverse, length, previous) or None;
+    matched = (matched point dict, previous) or None. The previous items are shared."""
+    __slots__ = ("cost", "edge", "rev", "offset", "path", "matched")
+
+    def __init__(self, cost, edge, rev, offset, path, matched):
+        self.cost, self.edge, self.rev, self.offset, self.path, self.matched = cost, edge, rev, offset, path, matched
+
+
+def _unlink(node):
+    """The items of a linked path or matched list, first to last."""
+    out = []
+    while node is not None:
+        out.append(node[:-1] if len(node) > 2 else node[0])
+        node = node[-1]
+    return out[::-1]
+
+
 class MapMatcher:
     
     def __init__(self, net, MAX_GPS_ERROR=60, 
@@ -41,7 +58,8 @@ class MapMatcher:
                  DIFF_GPS_ERROR=10,
                  MAX_RUNNING_TIME=5,
                  engine=None,
-                 debug=False):
+                 debug=False,
+                 BEAM_WIDTH=5):
         
         if not isinstance(net, network.Net):
             raise ValueError("network.Net expected")
@@ -62,8 +80,8 @@ class MapMatcher:
         self.path= []  # item: {"edge":,"reverese":,"length":}
         self.MINSPEED_BEARING = 1 #m/s
         self.engine = engine  # "auto", "rust" or "python"; see engine.py
-        self.debug = debug    # True: write new_sample.csv and print the path at each decision
-        self.timed_out = False  # True when the last match stopped at MAX_RUNNING_TIME (a part of the path)
+        self.debug = debug    # True: write new_sample.csv and print the path
+        self.BEAM_WIDTH = BEAM_WIDTH  # the number of hypotheses that the matcher keeps
         
         
     
@@ -132,7 +150,7 @@ class MapMatcher:
         return  cost
 
     
-    def outgoinglist(self, edge, reverse):
+    def outgoinglist(self, edge, reverse, path=None):
         """
         Retrieves a list of outgoing edge IDs from a given edge.
 
@@ -154,8 +172,9 @@ class MapMatcher:
             if (not self.U_TURN_ON_ONEWAY) and (edge in out):
                 out.remove(edge)
             
-            path = [item["edge"] for item in self.path]
-            
+            if path is None:
+                path = [item["edge"] for item in self.path]
+
             if( not self.LOOP):
                 for item in path:
                     if item in out:
@@ -166,6 +185,8 @@ class MapMatcher:
         else:
             node = edge.getToNode()
             out = node.getOutgoing()
+            if path is None:
+                path = [item["edge"] for item in self.path]
             if( not self.LOOP):
                 for item in path:
                     if item in out:
@@ -185,387 +206,139 @@ class MapMatcher:
     
     def match(self, sample_gps):
         """
-        Matches GPS observations to road network edges.
+        Matches GPS points to road network edges with a beam search.
+
+        The matcher keeps at most BEAM_WIDTH hypotheses (a path, the last matched point and the
+        total cost). For each point, it extends each hypothesis to its candidate edges (stay on the
+        edge, change to an outgoing edge, or both, from the speed and the rest of the edge). A
+        candidate farther than MAX_GPS_ERROR + MAX_MAP_ERROR from the point is not used. The
+        BEAM_WIDTH children with the lowest total cost stay, at most one for each (edge, reverse).
+        When no hypothesis can continue, the match starts again from the edges near the point (a
+        gap). When no edge is near the point, the matcher skips the point.
 
         Args:
-            observations (DataFrame): GPS observations DataFrame.
+            sample_gps (DataFrame): columns x, y, timestamp, speed, bearing, type.
 
         Returns:
-            DataFrame: DataFrame containing the matched points.
-
+            int: 1, with the result in self.matchdf and self.path (0 when sample_gps is not a DataFrame).
         """
-        #sample_gps = self.reconstruct_observations(observations)
         if not isinstance(sample_gps, pd.DataFrame):
             return 0
         if self.debug:
-            sample_gps.to_csv("new_sample.csv",index=False)
-        self.timed_out = False
-        # the Python code has no MAP_ONE_WAY_FIX=False with LOOP=False (NameError): keep it there
-        if use_rust(self.engine) and (self.MAP_ONE_WAY_FIX or self.LOOP):
+            sample_gps.to_csv("new_sample.csv", index=False)
+        if use_rust(self.engine):
             return self._match_rust(sample_gps)
-        
-        #initialpoint
-        p = sample_gps.iloc[0]
-        matchedpoints = []
-        edges, reversedict = self.first_point_matching(p["x"],p["y"])
-        #print(reversedict)
-        myindex = 0
-        last_edge = None
-        last_offset = None
-        #current_time = sample_gps.iloc[0]["timestamp"]
-        #next_time = sample_gps.iloc[1]["timestamp"]
-        decisionlist = []
-        decisionlist.append({"index":0, "result":set(edges), "last_edge":None, "offset":None ,"reversedict":reversedict})
-        includeJunctions = False
-  
-        last_edge_reverse = None
-        
-        start_time = time.time()
-
-
-        current_time = time.time()
-
-        # other point matching
-        while(myindex <len(sample_gps)):
-      
-            for index,row in sample_gps.iloc[myindex:].iterrows():
-                if last_edge!= decisionlist[-1]["last_edge"]:
-                    raise ValueError("error in the algorithm")
-
-                check=False
-                if last_edge!=None:
-                    remind_offset = self.path[-1]["length"]-last_offset
-                    #print(f"index = {index}, edge={last_edge.getID()} , last_offset = {last_offset},remind_offset = {remind_offset}")
-                    decision = self.decision_stay_change_nodecide(remind_offset,
-                                                             row.speed,last_edge.getSpeed(), 1)
-                    check =True
-                else:
-                    decision = "CHANGE"
-                    edges = decisionlist[-1]["result"]
-                    reversedict = decisionlist[-1]["reversedict"]
-                    #reversedict remove lastedge
-
-
-                if decision == "STAY":
-                    edges = {last_edge}
-                    reversedict = {last_edge:last_edge_reverse}
-
-                elif decision == "CHANGE" and last_edge!=None:
-                    edges, reversedict = self.outgoinglist(last_edge, last_edge_reverse)
-
-                elif decision == "NODECISION":
-                    edges, reversedict = self.outgoinglist(last_edge, last_edge_reverse)    
-                    edges.add(last_edge)
-                    reversedict[last_edge] = last_edge_reverse
-                
-
-
-                #print(f"index = {index}, decision = {decision}")
-                #print(decisionlist[-1]["result"])
-                #if index+1 < len(sample_gps):
-                #    next_time = sample_gps.iloc[index+1]["timestamp"]
-                if len(edges) == 0:
-                    # no candidate edge (a dead end, or no edge near the point): the match starts again
-                    # at this point. The path found before stays. Without an edge near the point, skip it.
-                    edges, reversedict = self.first_point_matching(row.x, row.y)
-                    decisionlist = [{"index":index, "result":edges, "last_edge":None, "offset":None,
-                                     "reversedict":reversedict}]
-                    last_edge = None
-                    last_offset = None
-                    last_edge_reverse = None
-                    if len(edges) == 0:
-                        myindex = index
-                        continue
-
-                x, y = row.x, row.y
-                edgesinfo = []
-                
-
-                if len(edges) > 0:
-                    for edge in edges:
-
-                       
-                        if (edge!=last_edge and last_edge!=None):
-                            temp_edge = last_edge
-                            #print(f"last_edge = {last_edge}, reversedict = {reversedict}")
-                            temp_reverse = last_edge_reverse
-                            #print(f"{index} , last_edge_reverse = {last_edge_reverse}")
-
-                        elif len(self.path)<2:
-                            temp_edge = None
-                            temp_reverse = False
-                        else:
-                            temp_edge = self.path[-2]["edge"]
-                            temp_reverse = self.path[-2]["reverse"]
-                            #print(f"{index} , from_reverse = {from_reverse}")
-
-                        currentedge_shape = combineShapesSumo(edge,temp_edge, reversedict[edge],temp_reverse)
-                        #print(f"index = {index}, edge = {edge.getID()}, temp_edge={temp_edge}")
-                        #print(f" reverseedge={reversedict[edge]}, temp_reverse = {temp_reverse}")
-
-                        currentedge_length = polyLength(currentedge_shape)
-                        #print(currentedge_length)
-                        tempedge_length = polyLength(currentedge_shape)
-                        offset , matchpoint= polygonOffsetWithMinimumDistanceToPoint([x,y], currentedge_shape)
-                        #if(len(matchedpoints)>0):
-                        #    if(last_edge!=None):
-                        #        if(edge==last_edge):
-                        #            offset = max(offset, last_offset)
-
-                        #matchpoint = geomhelper.positionAtShapeOffset(currentedge_shape, offset)
-
-                        dist = distance2d(matchpoint, (x,y))
-
-                        matched_bearing = offsetBearing(currentedge_shape, offset)
-                        dist_bearing = min(abs(row.bearing - matched_bearing), 360-abs(row.bearing - matched_bearing))
-
-                        if(len(matchedpoints)>0):
-                            lastedgeinfo = matchedpoints[-1]
-                            last_edge_length = lastedgeinfo["edge_length"]
-                            lastedge = self.net.getEdge(lastedgeinfo["edgeid"])
-                            lastoffset = lastedgeinfo["offset"]
-                            lasttimestamp = lastedgeinfo["timestamp"]
-                            last_sample =(lastedgeinfo["x_sample"],lastedgeinfo["y_sample"])
-                            last_matched= (lastedgeinfo["x"],lastedgeinfo["y"])
-
-                        else:
-                            lastedge = edge
-                            lastoffset = offset
-                            lasttimestamp = row.timestamp
-                            last_sample = (x,y)
-                            last_matched= matchpoint
-                            last_edge_length = 0
-
-                        air_sample_distance = distance2d(last_sample, (x,y)) #row.distance 
-                        air_matched_distance = distance2d(last_matched, matchpoint)
-                        cost_air = abs(air_sample_distance - air_matched_distance)
-
-                        speed = row.speed
-                        deltaTime = 1 #(int(row.timestamp) - int(lasttimestamp))
-
-                        #print(f"lattimestamp = {int(lasttimestamp)}, currenttimestamp = {int(row.timestamp)}, delta = {deltaTime}")
-                        predict_distance = float(speed) * deltaTime
-                        matched_road_distance =  road_distance(edge, offset, lastedge , lastoffset, last_edge_length)
-                        #print(f"index = {index}, edge = {edge.getID()}, offset={offset} lastoffset={lastoffset}")
-                        #print(f"lastge={lastedge.getID()}, lastedgelen = {last_edge_length} roaddistance = {matched_road_distance}")
-
-                        # rd is based on speed
-                        rd = abs(matched_road_distance - predict_distance)
-
-                        #if matched_road_distance == 0 and predict_distance > 3 and offset!=0:
-                        #    rd = rd*50
-                        cost = 1*dist_bearing + 10*dist  + 10*cost_air  +10*rd
-                        cost = self.cost_calculate(dist_bearing, dist, cost_air, rd, reversedict[edge])
-
-                        edgesinfo.append({"edge":edge, "dist":dist, "matchbearing":matched_bearing, "timestamp":row.timestamp,
-                                          "predict_distance":predict_distance, "matched_road_distance": matched_road_distance,
-                                          "speed":speed, "cost_air":cost_air,"from_edge":temp_edge.getID() if temp_edge!=None else None,
-                                         "cost":cost, "matchpoint":matchpoint, "offset":offset, "distbearing":dist_bearing, "rd":rd,
-                                         "edge_length":currentedge_length, "from_edge_reverse":temp_reverse})
-
-
-                    bestedgeinfo = min(edgesinfo, key=lambda item:item["cost"])
-
-                    matchpoint = bestedgeinfo["matchpoint"]
-                    matchbearing = bestedgeinfo["matchbearing"]
-                    bestedge = bestedgeinfo["edge"]
-                    offset = bestedgeinfo["offset"]
-                    distbearing = bestedgeinfo["distbearing"]
-                    x,y = matchpoint
-                    #if index==176:
-                            #display(pd.DataFrame(edgesinfo))
-           
-                    if (bestedgeinfo["dist"] >  self.radius): # back to first changing edge and start on that point as initial point
-                        if bestedge in decisionlist[-1]["result"]:
-                            decisionlist[-1]["result"].remove(bestedge)
-
-                        counter = 0
-                        while len(decisionlist)>0 and len(decisionlist[-1]["result"])==0:
-                            counter+=1
-                            decisionlist.pop()
-                            #print(f"befor pop = {len(self.path)}")
-                            if self.path:
-                                self.path.pop()
-                            #print(f"after pop = {len(self.path)}")
-                        
-                        if counter == 0 and self.path:
-                            self.path.pop()
-                            
-                        if len(decisionlist)==0:
-                            # no decision point is left: the match starts again at this point
-                            edges0, reversedict0 = self.first_point_matching(row.x, row.y)
-                            decisionlist.append({"index":index, "result":edges0, "last_edge":None,
-                                                 "offset":None, "reversedict":reversedict0})
-                       #if counter > 5:
-                       #     print(f"map error in index {index} and timestamp {row.timestamp} ...")
-                       #     return 0
-                        decisionlist[-1]["offset"] = None
-
-                        decisionlist[-1]["last_edge"] = None
-                        decisionlist[-1]["last_edge_reverse"] = None
-                        #print(decisionlist[-1]["result"])
-                        myindex = decisionlist[-1]["index"]
-                        #print(f"len(decision) = {len(decisionlist)}")
-                        if self.debug:
-                            print(f"decision back index = {myindex}")
-                            self.show_path()
-                       
-                        try:
-                            while len(matchedpoints) > 0 and matchedpoints[-1]["index"]>=myindex :
-                                    matchedpoints.pop()
-                        except IndexError:
-                            if self.debug:
-                                print("indexError")
-                            return 0
-                        
-                        #ttt = [len(item["result"]) for item in decisionlist]
-                        #edgename = [e.getID() for e in decisionlist[-1]["result"]]
-                        #print(f"{ttt}, edges = {edgename}")
-
-                        last_offset = None
-                        last_edge = None
-                        last_edge_reverse = None
-
-
-                        break
-
-                    else:
-                        last_offset = offset
-
-                        matchedpoints.append({"index":index, "timestamp":row.timestamp, "x":x, "y":y,"bearing":row.bearing,
-                                              "rd":bestedgeinfo["rd"],"dist":bestedgeinfo["dist"],"from_edge":bestedgeinfo["from_edge"],
-                                              "predict_distance":bestedgeinfo["predict_distance"],"speed":bestedgeinfo["speed"],
-                                              "matched_road_distance": bestedgeinfo["matched_road_distance"],"y_sample":row.y,
-                                              "x_sample":row.x, "cost_air": bestedgeinfo["cost_air"],"decitsion":decision,
-                                              "matchbearing":matchbearing, "edgeid":bestedge.getID(), "offset":offset, "distbearing":distbearing,
-                                             "edge_length":bestedgeinfo["edge_length"],"type":row["type"], "edge_reverse":reversedict[bestedge],
-                                            "from_edge_reverse":bestedgeinfo["from_edge_reverse"]})
- 
-                        
-                        if last_edge==None:   # first iteration after initial point or back to change path
-                            decisionlist[-1]["last_edge"]=bestedge
-                            decisionlist[-1]["last_edge_reverse"]=reversedict[bestedge]
-
-                            decisionlist[-1]["offset"]=offset
-                            decisionlist[-1]["result"].remove(bestedge)
-                            decisionlist[-1]["reversedict"] = reversedict
-                        
-                            
-                            if len(self.path)>0:
-                                from_edge = self.path[-1]["edge"]
-                                from_reverse = self.path[-1]["reverse"]
-                            else:
-                                from_edge = None
-                                from_reverse = False
-                                
-                            edgelength = polyLength(combineShapesSumo(bestedge,from_edge,
-                                                                                   reversedict[bestedge], from_reverse))
-                            
-                            self.path.append({"edge":bestedge, "reverse":reversedict[bestedge],
-                                             "length":edgelength})
-                            
-                    
-                            last_offset = offset
-                            last_edge = bestedge
-                            last_edge_reverse = reversedict[bestedge]
-                                #print(f"len(decision) = {len(decisionlist)}")
-
-                            if self.debug:
-                                print(f"decision index start = {index}")
-                                self.show_path()
-
-
-                        elif bestedge==last_edge: # stay on edge
-                            decisionlist[-1]["offset"]=offset
-                            last_offset = offset
-
-
-
-
-                        elif bestedge!=last_edge :#and last_edge!=None: # changing edge
-
-                            if last_edge in edges:
-                                edges.remove(last_edge)
-
-                            edges.remove(bestedge)
-                           
-                            if len(self.path)>0:
-                                from_edge = self.path[-1]["edge"]
-                                from_reverse = self.path[-1]["reverse"]
-                            else:
-                                from_edge = None
-                                from_reverse = False
-                                
-                            edgelength = polyLength(combineShapesSumo(bestedge,from_edge,
-                                                                                   reversedict[bestedge], from_reverse))
-                            
-                            self.path.append({"edge":bestedge, "reverse":reversedict[bestedge],
-                                             "length":edgelength})
-
-                            last_edge = bestedge
-                            last_offset = offset
-                            last_edge_reverse = reversedict[bestedge]
-
-                            if(len(edges)>=0): 
-                                decisionlist.append({"index":index, "result":edges, "last_edge":bestedge,
-                                                     "offset":last_offset, "last_edge_reverse":reversedict[bestedge],
-                                                    "reversedict":reversedict})
-                                
-                                #ttt = [len(item["result"]) for item in decisionlist]
-                                #index_list = [item["index"] for item in decisionlist]
-                                #mpath = [item["last_edge"].getID() for item in decisionlist]
-                                #print(f"len(decision) = {len(decisionlist)}")
-
-                                if self.debug:
-                                    print(f"decision index = {index}")
-                                    self.show_path()
-
-                                #print(f"path = {mpath}")
-
-
-                        if last_edge!= decisionlist[-1]["last_edge"]:
-                            raise ValueError("error 2 in the algorithm.")
-                        
-                        myindex = index
-            
-                else:
-                    raise ValueError("error in the algorithm. ln(edges)==0")
-            if index== len(sample_gps) - 1:
-                myindex = index+1
-            current_time = time.time()
-
-            # Calculate the elapsed time
-            if(current_time - start_time) > self.MAX_RUNNING_TIME:
-                if self.debug:
-                    print(f"running time is more than {self.MAX_RUNNING_TIME} seconds.")
-                self.timed_out = True
-                break
-        self.matchdf = pd.DataFrame(matchedpoints)
-
+        beam = []
+        for index, row in sample_gps.iterrows():
+            beam = self.step(beam, index, row)
+        best = beam[0] if beam else _Hyp(0.0, None, False, None, None, None)
+        self.path = [{"edge": e, "reverse": r, "length": l} for e, r, l in _unlink(best.path)]
+        self.matchdf = pd.DataFrame(_unlink(best.matched))
+        if self.debug:
+            self.show_path()
         return 1
-    
-    
-    
-        
+
+    def _edge_index(self, edge):
+        if getattr(self, "_index", None) is None:
+            self._index = {e: i for i, e in enumerate(self.net._edgeidlist)}
+        return self._index[edge.getID()]
+
+    def step(self, beam, index, row):
+        """One point of the beam search: returns the new beam (sorted by total cost)."""
+        children = []
+        for h in beam:
+            remind_offset = h.path[2] - h.offset
+            decision = self.decision_stay_change_nodecide(remind_offset, row.speed, h.edge.getSpeed(), 1)
+            if decision == "STAY":
+                edges, reversedict = {h.edge}, {h.edge: h.rev}
+            else:
+                path = [p[0] for p in _unlink(h.path)]
+                edges, reversedict = self.outgoinglist(h.edge, h.rev, path)
+                if decision == "NODECISION":
+                    edges.add(h.edge)
+                    reversedict[h.edge] = h.rev
+            children += self._extend(h, index, row, decision, edges, reversedict)
+        if not children:
+            # no hypothesis can continue: start again from the edges near the point (a gap)
+            base = beam[0] if beam else _Hyp(0.0, None, False, None, None, None)
+            start = _Hyp(base.cost, None, False, None, base.path, base.matched)
+            edges, reversedict = self.first_point_matching(row.x, row.y)
+            children = self._extend(start, index, row, "CHANGE", edges, reversedict)
+            if not children:
+                return beam  # no edge near the point: skip it
+        children.sort(key=lambda c: c.cost)
+        out, seen = [], set()
+        for c in children:
+            if (c.edge, c.rev) not in seen:
+                seen.add((c.edge, c.rev))
+                out.append(c)
+                if len(out) == self.BEAM_WIDTH:
+                    break
+        return out
+
+    def _extend(self, h, index, row, decision, edges, reversedict):
+        """The children of hypothesis h on the candidate edges (in the sequence of net._edgeidlist)."""
+        out = []
+        x, y = row.x, row.y
+        for edge in sorted(edges, key=self._edge_index):
+            rev = reversedict[edge]
+            if h.edge is not None and edge != h.edge:
+                temp_edge, temp_reverse = h.edge, h.rev
+            elif h.edge is not None and h.path[3] is not None:   # stay: the edge before it
+                temp_edge, temp_reverse = h.path[3][0], h.path[3][1]
+            else:
+                temp_edge, temp_reverse = None, False
+            shape = combineShapesSumo(edge, temp_edge, rev, temp_reverse)
+            edge_length = polyLength(shape)
+            offset, matchpoint = polygonOffsetWithMinimumDistanceToPoint([x, y], shape)
+            dist = distance2d(matchpoint, (x, y))
+            if dist > self.radius:
+                continue
+            matched_bearing = offsetBearing(shape, offset)
+            dist_bearing = min(abs(row.bearing - matched_bearing), 360 - abs(row.bearing - matched_bearing))
+            if h.matched is not None:
+                last = h.matched[0]
+                lastedge = self.net.getEdge(last["edgeid"])
+                lastoffset, last_edge_length = last["offset"], last["edge_length"]
+                last_sample, last_matched = (last["x_sample"], last["y_sample"]), (last["x"], last["y"])
+            else:
+                lastedge, lastoffset, last_edge_length = edge, offset, 0
+                last_sample, last_matched = (x, y), matchpoint
+            cost_air = abs(distance2d(last_sample, (x, y)) - distance2d(last_matched, matchpoint))
+            predict_distance = float(row.speed) * 1
+            matched_road_distance = road_distance(edge, offset, lastedge, lastoffset, last_edge_length)
+            rd = abs(matched_road_distance - predict_distance)
+            cost = self.cost_calculate(dist_bearing, dist, cost_air, rd, rev)
+            rec = {"index": index, "timestamp": row.timestamp, "x": matchpoint[0], "y": matchpoint[1],
+                   "bearing": row.bearing, "rd": rd, "dist": dist,
+                   "from_edge": temp_edge.getID() if temp_edge is not None else None,
+                   "predict_distance": predict_distance, "speed": row.speed,
+                   "matched_road_distance": matched_road_distance, "y_sample": y, "x_sample": x,
+                   "cost_air": cost_air, "decitsion": decision, "matchbearing": matched_bearing,
+                   "edgeid": edge.getID(), "offset": offset, "distbearing": dist_bearing,
+                   "edge_length": edge_length, "type": row["type"], "edge_reverse": rev,
+                   "from_edge_reverse": temp_reverse}
+            if edge == h.edge:
+                path = h.path
+            else:
+                frm = h.path
+                length = polyLength(combineShapesSumo(edge, frm[0] if frm else None, rev,
+                                                      frm[1] if frm else False))
+                path = (edge, rev, length, h.path)
+            out.append(_Hyp(h.cost + cost, edge, rev, offset, path, (rec, h.matched)))
+        return out
+
     def _match_rust(self, sample_gps):
         """match() with the Rust engine: the same matchdf and path as the Python code."""
         rnet = rust_network(self.net)
         ids = self.net._edgeidlist
-        index = self.net._rust_edge_index
         m = rust.Matcher(rnet, self.MAX_GPS_ERROR, self.MAX_MAP_ERROR, self.MAP_ONE_WAY_FIX,
-                         self.U_TURN_ON_ONEWAY, self.LOOP, self.DIFF_GPS_ERROR,
-                         max_running_time=float(self.MAX_RUNNING_TIME),
-                         path=[(index[it["edge"].getID()], bool(it["reverse"]), float(it["length"])) for it in self.path])
-        try:
-            ok = m.match_trace(sample_gps.index.astype("int64").tolist(),
-                               sample_gps["x"].astype(float).tolist(), sample_gps["y"].astype(float).tolist(),
-                               sample_gps["speed"].astype(float).tolist(), sample_gps["bearing"].astype(float).tolist())
-        finally:
-            self.path = [{"edge": self.net.getEdge(ids[e]), "reverse": rev, "length": length}
-                         for e, rev, length in m.path()]
-        if not ok:
-            return 0
-        self.timed_out = m.timed_out
+                         self.U_TURN_ON_ONEWAY, self.LOOP, self.DIFF_GPS_ERROR, beam_width=self.BEAM_WIDTH)
+        m.match_trace(sample_gps.index.astype("int64").tolist(),
+                      sample_gps["x"].astype(float).tolist(), sample_gps["y"].astype(float).tolist(),
+                      sample_gps["speed"].astype(float).tolist(), sample_gps["bearing"].astype(float).tolist())
+        self.path = [{"edge": self.net.getEdge(ids[e]), "reverse": rev, "length": length}
+                     for e, rev, length in m.path()]
         r = m.result()
         if not r["pos"]:
             self.matchdf = pd.DataFrame([])
