@@ -126,7 +126,7 @@ struct Matcher(c::Matcher);
 impl Matcher {
     #[new]
     #[pyo3(signature = (network, max_gps_error, max_map_error, map_one_way_fix, u_turn_on_oneway, loop_,
-                        diff_gps_error, path=Vec::new()))]
+                        diff_gps_error, max_running_time=5.0, path=Vec::new()))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         network: &Network,
@@ -136,14 +136,24 @@ impl Matcher {
         u_turn_on_oneway: bool,
         loop_: bool,
         diff_gps_error: f64,
+        max_running_time: f64,
         path: Vec<(usize, bool, f64)>,
     ) -> Self {
-        let p = c::Params { max_gps_error, max_map_error, map_one_way_fix, u_turn_on_oneway, loop_, diff_gps_error };
+        let p = c::Params {
+            max_gps_error,
+            max_map_error,
+            map_one_way_fix,
+            u_turn_on_oneway,
+            loop_,
+            diff_gps_error,
+            max_running_time,
+        };
         let path = path.into_iter().map(|(edge, rev, len)| c::PathItem { edge, rev, len }).collect();
         Matcher(c::Matcher::new(Arc::clone(&network.0), p, path))
     }
 
-    /// Match a full trace. `labels` is the DataFrame index. Returns 1 (done) or 0 (the Python code returns 0).
+    /// Match a full trace. `labels` is the DataFrame index. Returns 1. At `max_running_time` the
+    /// match stops and keeps the path found so far (see `timed_out`).
     fn match_trace(
         &mut self,
         py: Python<'_>,
@@ -161,10 +171,16 @@ impl Matcher {
         Ok((s == c::Status::Done) as i32)
     }
 
-    /// Add one point and match it. Returns the number of matched points, or -1 when the match failed.
+    /// Add one point and match it. Returns the number of matched points.
     fn push(&mut self, x: f64, y: f64, speed: f64, bearing: f64) -> PyResult<i64> {
-        let s = self.0.push(x, y, speed, bearing).map_err(err)?;
-        Ok(if s == c::Status::Failed { -1 } else { self.0.matched.len() as i64 })
+        self.0.push(x, y, speed, bearing).map_err(err)?;
+        Ok(self.0.matched.len() as i64)
+    }
+
+    /// True when the last `match_trace` stopped at `max_running_time`.
+    #[getter]
+    fn timed_out(&self) -> bool {
+        self.0.timed_out
     }
 
     /// The edge index of the last matched point, or None.

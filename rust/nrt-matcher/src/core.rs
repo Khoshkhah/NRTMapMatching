@@ -606,6 +606,9 @@ pub struct Params {
     pub u_turn_on_oneway: bool,
     pub loop_: bool,
     pub diff_gps_error: f64,
+    /// `MAX_RUNNING_TIME` in seconds. `match_trace` stops at this limit and keeps the path found so
+    /// far; `push` stops its step back at this limit and continues it at the next push.
+    pub max_running_time: f64,
 }
 
 /// One GPS point of the input. `label` is the DataFrame index label (Python mixes it with the position).
@@ -680,18 +683,16 @@ fn set_remove(v: &mut Vec<(usize, bool)>, e: usize) -> bool {
     }
 }
 
-/// The end state of `match`: 1 = done, 0 = the Python code returns 0 (no result).
+/// `Done` after `match_trace`; `Running` while `push` adds points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Running,
     Done,
-    Failed,
 }
 
 enum Step {
     Accept(i64),
     Back(i64),
-    Stop,
 }
 
 /// The state of `MapMatcher.match`. `match_trace` runs it on a full trace; `push` adds one point
@@ -708,11 +709,9 @@ pub struct Matcher {
     last_offset: f64,
     last_rev: bool,
     pub status: Status,
-    elapsed: Duration,
+    /// True when the last `match_trace` stopped at `max_running_time` (the path is only a part).
+    pub timed_out: bool,
 }
-
-/// The Python code stops after 10 s of matching.
-const MAX_TIME: Duration = Duration::from_secs(10);
 
 impl Matcher {
     pub fn new(net: Arc<Network>, p: Params, path: Vec<PathItem>) -> Self {
@@ -728,7 +727,7 @@ impl Matcher {
             last_offset: 0.0,
             last_rev: false,
             status: Status::Running,
-            elapsed: Duration::ZERO,
+            timed_out: false,
         }
     }
 
@@ -760,13 +759,18 @@ impl Matcher {
     }
 
     fn start(&mut self) {
-        let p0 = self.pts[0];
-        let r = self.radius();
-        let result = self.net.neighboring_edges(p0.x, p0.y, r).into_iter().map(|(e, _)| (e, false)).collect();
-        self.branches = vec![Branch { index: 0, result, last_edge: None }];
+        self.branches = vec![self.start_branch(0, 0)];
         self.myindex = 0;
         self.last_edge = None;
         self.status = Status::Running;
+        self.timed_out = false;
+    }
+
+    /// `first_point_matching`: a decision point at the point `pos` with the edges near it.
+    fn start_branch(&self, pos: usize, index: i64) -> Branch {
+        let p = self.pts[pos];
+        let result = self.net.neighboring_edges(p.x, p.y, self.radius()).into_iter().map(|(e, _)| (e, false)).collect();
+        Branch { index, result, last_edge: None }
     }
 
     fn run(&mut self, batch: bool) -> Result<(), String> {
@@ -784,10 +788,6 @@ impl Matcher {
                         broke = true;
                         break;
                     }
-                    Step::Stop => {
-                        self.status = Status::Failed;
-                        return Ok(());
-                    }
                 }
             }
             if batch {
@@ -797,12 +797,14 @@ impl Matcher {
             } else if !broke {
                 self.myindex = n;
             }
-            if self.elapsed + t0.elapsed() > MAX_TIME {
-                self.status = Status::Failed;
+            if t0.elapsed() > Duration::from_secs_f64(self.p.max_running_time) {
+                if batch {
+                    self.timed_out = true;
+                    self.status = Status::Done;
+                }
                 return Ok(());
             }
         }
-        self.elapsed += t0.elapsed();
         if batch {
             self.status = Status::Done;
         }
@@ -872,7 +874,16 @@ impl Matcher {
             None => (self.branches.last().unwrap().result.clone(), Decision::Change),
         };
         if edges.is_empty() {
-            return Err("error in the algorithm. ln(edges)==0".into());
+            // no candidate edge (a dead end, or no edge near the point): the match starts again at
+            // this point. The path found before stays. Without an edge near the point, skip it.
+            let b = self.start_branch(pos, pt.label);
+            edges = b.result.clone();
+            self.branches = vec![b];
+            self.last_edge = None;
+            self.last_rev = false;
+            if edges.is_empty() {
+                return Ok(Step::Accept(pt.label));
+            }
         }
 
         let xy = [pt.x, pt.y];
@@ -944,14 +955,17 @@ impl Matcher {
             while self.branches.last().is_some_and(|br| br.result.is_empty()) {
                 counter += 1;
                 self.branches.pop();
-                self.path.pop().ok_or("pop from empty list")?;
+                self.path.pop();
             }
             if counter == 0 {
-                self.path.pop().ok_or("pop from empty list")?;
+                self.path.pop();
             }
-            let Some(top) = self.branches.last_mut() else {
-                return Ok(Step::Stop);
-            };
+            if self.branches.is_empty() {
+                // no decision point is left: the match starts again at this point
+                let b = self.start_branch(pos, pt.label);
+                self.branches.push(b);
+            }
+            let top = self.branches.last_mut().unwrap();
             top.last_edge = None;
             let back = top.index;
             while self.matched.last().is_some_and(|m| m.label >= back) {

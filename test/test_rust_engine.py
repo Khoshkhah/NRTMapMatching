@@ -134,7 +134,10 @@ def compare_trip(net, s):
     out["_ties"] = len(ties)
     out["_failed"] = bool(ep) or not okp
     okr, er = run(lambda: mr.match(ip.copy()))
-    if ep or er or okp != okr:
+    if mp.timed_out or mr.timed_out:
+        # the Rust engine goes further in the same time: the parts of the path are not the same
+        out["_timeout"] = True
+    elif ep or er or okp != okr:
         out["match"] = f"result {okp!r}/{ep!r} != {okr!r}/{er!r}" if (ep, okp) != (er, okr) else ""
     elif okp:
         out["match"] = frames_equal(mp.matchdf, mr.matchdf)
@@ -184,11 +187,89 @@ def test_push_equals_match(data, tmp_path, monkeypatch):
         assert [ids[e] for e in online.result()["edge"]] == m.matchdf["edgeid"].tolist(), t
 
 
+# ---------------------------------------------------------------------------------------------
+# The faults of the old matcher (before 2026-11-21). Each test runs both engines.
+# ---------------------------------------------------------------------------------------------
+
+def trip_points(data, trip):
+    from cleandata import cleaningData
+    from interpolation import interpolateTrajectory
+    net, gps = data
+    s = gps[gps["trip_id_extended"] == trip].sort_values("timestamp").drop_duplicates()
+    return interpolateTrajectory(cleaningData(s, net, engine="python"), engine="python")
+
+
+@pytest.mark.parametrize("eng", ["python", "rust"])
+def test_fault1_step_back_empties_the_path(data, tmp_path, monkeypatch, eng):
+    """The old matcher raised IndexError 'pop from empty list' on this trip."""
+    monkeypatch.chdir(tmp_path)
+    from mapmatching import MapMatcher
+    m = MapMatcher(data[0], engine=eng)
+    assert m.match(trip_points(data, "14010000510061335_0")) == 1
+    assert len(m.matchdf) > 0 and len(m.path) > 0
+
+
+@pytest.mark.parametrize("eng", ["python", "rust"])
+def test_fault1_no_decision_point_left(data, tmp_path, monkeypatch, eng):
+    """The old matcher returned 0 on this trip ('decision list is empty')."""
+    monkeypatch.chdir(tmp_path)
+    from mapmatching import MapMatcher
+    m = MapMatcher(data[0], engine=eng)
+    assert m.match(trip_points(data, "14010000510073977_0")) == 1
+    assert len(m.matchdf) > 0 and len(m.path) > 0
+
+
+@pytest.mark.parametrize("eng", ["python", "rust"])
+def test_fault2_time_limit(data, tmp_path, monkeypatch, eng):
+    """The old matcher had a fixed 10 s limit and returned 0 there. Now the limit is MAX_RUNNING_TIME,
+    and at the limit match returns 1 with the path found so far."""
+    monkeypatch.chdir(tmp_path)
+    from mapmatching import MapMatcher
+    m = MapMatcher(data[0], MAX_RUNNING_TIME=0, engine=eng)
+    assert m.match(trip_points(data, "14010000510073977_0")) == 1   # a trip with step backs
+    assert m.timed_out and len(m.matchdf) > 0
+
+
+@pytest.mark.parametrize("eng", ["python", "rust"])
+def test_fault3_no_candidate_edge(data, tmp_path, monkeypatch, eng):
+    """The old matcher raised ValueError 'ln(edges)==0' when no edge is near a point.
+    Now it skips the point (a gap) and matches the other points."""
+    monkeypatch.chdir(tmp_path)
+    from mapmatching import MapMatcher
+    pts = trip_points(data, "14010000510059476_0")
+    pts.loc[pts.index[0], "x"] += 1000.0          # the first point is 1 km from all edges
+    m = MapMatcher(data[0], engine=eng)
+    assert m.match(pts) == 1
+    assert pts.index[0] not in set(m.matchdf["index"]) and len(m.matchdf) == len(pts) - 1
+
+
+def test_engines_equal_after_fixes(data, tmp_path, monkeypatch):
+    """The trips of the faults give the same matches in both engines."""
+    monkeypatch.chdir(tmp_path)
+    net, gps = data
+    for t in ["14010000510061335_0", "14010000510073977_0", "14010000526371002_0", "14010000526351621_0"]:
+        s = gps[gps["trip_id_extended"] == t].sort_values("timestamp").drop_duplicates()
+        d = {k: v for k, v in compare_trip(net, s).items() if not k.startswith("_")}
+        assert not d, (t, d)
+
+
+def test_reset_quiet_no_file(data, tmp_path, monkeypatch, capsys):
+    """reset() clears the path; match() writes no file and prints nothing (only with debug=True)."""
+    monkeypatch.chdir(tmp_path)
+    from mapmatching import MapMatcher
+    m = MapMatcher(data[0], engine="python")
+    m.match(trip_points(data, "14010000510061335_0"))
+    assert not os.listdir(tmp_path) and capsys.readouterr().out == ""
+    m.reset()
+    assert m.path == [] and m.matchdf is None
+
+
 if __name__ == "__main__":
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     net, gps = load()
     os.chdir(tempfile.mkdtemp())
-    stats = {"trips": 0, "points": 0, "trips with a tie": 0, "match fails (both engines)": 0, "max difference": 0.0}
+    stats = {"trips": 0, "points": 0, "trips with a tie": 0, "match fails (both engines)": 0,
+             "timed out (not compared)": 0, "max difference": 0.0}
     diffs = {}
     for t, s in trips(gps, n):
         d = compare_trip(net, s)
@@ -196,6 +277,7 @@ if __name__ == "__main__":
         stats["points"] += d.pop("_points", 0)
         stats["trips with a tie"] += d.pop("_ties", 0) > 0
         stats["match fails (both engines)"] += d.pop("_failed", False)
+        stats["timed out (not compared)"] += d.pop("_timeout", False)
         stats["max difference"] = max(stats["max difference"], d.pop("_maxdiff", 0.0))
         for k, v in d.items():
             diffs.setdefault(k, []).append((t, v))

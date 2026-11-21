@@ -68,7 +68,16 @@ The Python API does not change. When the module `nrt_matcher` is installed, the 
 
 For online use, `nrt_matcher.Matcher.push(x, y, speed, bearing)` matches one new point and continues the match from the points before it (see `test/test_rust_engine.py`).
 
-**Equal results.** `test/test_rust_engine.py` runs both engines on trips of `data/gps_inside_island.zip`. On 400 trips (215,742 matched points), all four stages give the same rows. Each point gets the same edge, and the largest difference in a number is 4e-12. Both engines fail on the same 100 trips (an `IndexError` of the algorithm). At an exact cost tie (21 of the 400 trips), the Python code takes the first edge in a Python set, and that sequence can change from one run to the next. The Rust engine takes the edge with the lowest index. The test gives the Python code the same tie rule.
+**Equal results.** `test/test_rust_engine.py` runs both engines on trips of `data/gps_inside_island.zip`. On 400 trips (282,656 matched points), all four stages give the same rows. Each point gets the same edge, and the largest difference in a number is 4e-12. The test does not compare the 17 trips that stop at `MAX_RUNNING_TIME`, because in the same time the Rust engine goes further than the Python code. At an exact cost tie (76 of the 400 trips), the Python code takes the first edge in a Python set, and that sequence can change from one run to the next. The Rust engine takes the edge with the lowest index. The test gives the Python code the same tie rule.
+
+**Matcher faults fixed** (2026-11-21, the same in both engines; the test has one test for each fault):
+
+- A step back that removed the full path raised `IndexError: pop from empty list`. Now an empty path is not popped. When no decision point is left, the match starts again at the current point (before, `match` returned 0).
+- The time limit was a fixed 10 s, and at the limit `match` returned 0. Now the limit is `MAX_RUNNING_TIME` (default 5 s). At the limit, `match` returns 1 with the path found so far, and `timed_out` is `True`.
+- A point with no candidate edge (a dead end, or no edge near the point) raised `ValueError: ... ln(edges)==0`. Now the match starts again at that point. If no edge is near the point, the matcher skips it (a gap).
+- `reset()` did not clear the path. `match()` wrote `new_sample.csv` into the current folder and printed the path many times. Now it does this only with `MapMatcher(..., debug=True)`.
+
+On a trace with no fault that takes less than 5 s, the result does not change.
 
 **Speed** (`python test/bench_rust_engine.py 200`, Apple M6, 150 trips that match, 100,282 points at 1 s):
 

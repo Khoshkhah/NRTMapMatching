@@ -40,7 +40,8 @@ class MapMatcher:
                  MAX_SPEED=100,
                  DIFF_GPS_ERROR=10,
                  MAX_RUNNING_TIME=5,
-                 engine=None):
+                 engine=None,
+                 debug=False):
         
         if not isinstance(net, network.Net):
             raise ValueError("network.Net expected")
@@ -61,12 +62,15 @@ class MapMatcher:
         self.path= []  # item: {"edge":,"reverese":,"length":}
         self.MINSPEED_BEARING = 1 #m/s
         self.engine = engine  # "auto", "rust" or "python"; see engine.py
+        self.debug = debug    # True: write new_sample.csv and print the path at each decision
+        self.timed_out = False  # True when the last match stopped at MAX_RUNNING_TIME (a part of the path)
         
         
     
     def reset(self):
         self.matchdf = None
         self.routedf = None
+        self.path = []
         
         
      
@@ -193,7 +197,9 @@ class MapMatcher:
         #sample_gps = self.reconstruct_observations(observations)
         if not isinstance(sample_gps, pd.DataFrame):
             return 0
-        sample_gps.to_csv("new_sample.csv",index=False)
+        if self.debug:
+            sample_gps.to_csv("new_sample.csv",index=False)
+        self.timed_out = False
         # the Python code has no MAP_ONE_WAY_FIX=False with LOOP=False (NameError): keep it there
         if use_rust(self.engine) and (self.MAP_ONE_WAY_FIX or self.LOOP):
             return self._match_rust(sample_gps)
@@ -258,6 +264,19 @@ class MapMatcher:
                 #print(decisionlist[-1]["result"])
                 #if index+1 < len(sample_gps):
                 #    next_time = sample_gps.iloc[index+1]["timestamp"]
+                if len(edges) == 0:
+                    # no candidate edge (a dead end, or no edge near the point): the match starts again
+                    # at this point. The path found before stays. Without an edge near the point, skip it.
+                    edges, reversedict = self.first_point_matching(row.x, row.y)
+                    decisionlist = [{"index":index, "result":edges, "last_edge":None, "offset":None,
+                                     "reversedict":reversedict}]
+                    last_edge = None
+                    last_offset = None
+                    last_edge_reverse = None
+                    if len(edges) == 0:
+                        myindex = index
+                        continue
+
                 x, y = row.x, row.y
                 edgesinfo = []
                 
@@ -365,15 +384,18 @@ class MapMatcher:
                             counter+=1
                             decisionlist.pop()
                             #print(f"befor pop = {len(self.path)}")
-                            self.path.pop()
+                            if self.path:
+                                self.path.pop()
                             #print(f"after pop = {len(self.path)}")
                         
-                        if counter == 0:
+                        if counter == 0 and self.path:
                             self.path.pop()
                             
                         if len(decisionlist)==0:
-                            print("error: decision list is empty!")
-                            return 0
+                            # no decision point is left: the match starts again at this point
+                            edges0, reversedict0 = self.first_point_matching(row.x, row.y)
+                            decisionlist.append({"index":index, "result":edges0, "last_edge":None,
+                                                 "offset":None, "reversedict":reversedict0})
                        #if counter > 5:
                        #     print(f"map error in index {index} and timestamp {row.timestamp} ...")
                        #     return 0
@@ -384,14 +406,16 @@ class MapMatcher:
                         #print(decisionlist[-1]["result"])
                         myindex = decisionlist[-1]["index"]
                         #print(f"len(decision) = {len(decisionlist)}")
-                        print(f"decision back index = {myindex}")
-                        self.show_path()
+                        if self.debug:
+                            print(f"decision back index = {myindex}")
+                            self.show_path()
                        
                         try:
                             while len(matchedpoints) > 0 and matchedpoints[-1]["index"]>=myindex :
                                     matchedpoints.pop()
                         except IndexError:
-                            print("indexError")
+                            if self.debug:
+                                print("indexError")
                             return 0
                         
                         #ttt = [len(item["result"]) for item in decisionlist]
@@ -446,8 +470,9 @@ class MapMatcher:
                             last_edge_reverse = reversedict[bestedge]
                                 #print(f"len(decision) = {len(decisionlist)}")
 
-                            print(f"decision index start = {index}")
-                            self.show_path()
+                            if self.debug:
+                                print(f"decision index start = {index}")
+                                self.show_path()
 
 
                         elif bestedge==last_edge: # stay on edge
@@ -491,8 +516,9 @@ class MapMatcher:
                                 #mpath = [item["last_edge"].getID() for item in decisionlist]
                                 #print(f"len(decision) = {len(decisionlist)}")
 
-                                print(f"decision index = {index}")
-                                self.show_path()
+                                if self.debug:
+                                    print(f"decision index = {index}")
+                                    self.show_path()
 
                                 #print(f"path = {mpath}")
 
@@ -509,9 +535,11 @@ class MapMatcher:
             current_time = time.time()
 
             # Calculate the elapsed time
-            if(current_time - start_time) > 10:
-                print(f"runnig time is more than {self.MAX_RUNNING_TIME} seconds.")
-                return 0
+            if(current_time - start_time) > self.MAX_RUNNING_TIME:
+                if self.debug:
+                    print(f"running time is more than {self.MAX_RUNNING_TIME} seconds.")
+                self.timed_out = True
+                break
         self.matchdf = pd.DataFrame(matchedpoints)
 
         return 1
@@ -526,7 +554,8 @@ class MapMatcher:
         index = self.net._rust_edge_index
         m = rust.Matcher(rnet, self.MAX_GPS_ERROR, self.MAX_MAP_ERROR, self.MAP_ONE_WAY_FIX,
                          self.U_TURN_ON_ONEWAY, self.LOOP, self.DIFF_GPS_ERROR,
-                         [(index[it["edge"].getID()], bool(it["reverse"]), float(it["length"])) for it in self.path])
+                         max_running_time=float(self.MAX_RUNNING_TIME),
+                         path=[(index[it["edge"].getID()], bool(it["reverse"]), float(it["length"])) for it in self.path])
         try:
             ok = m.match_trace(sample_gps.index.astype("int64").tolist(),
                                sample_gps["x"].astype(float).tolist(), sample_gps["y"].astype(float).tolist(),
@@ -536,6 +565,7 @@ class MapMatcher:
                          for e, rev, length in m.path()]
         if not ok:
             return 0
+        self.timed_out = m.timed_out
         r = m.result()
         if not r["pos"]:
             self.matchdf = pd.DataFrame([])
