@@ -284,8 +284,9 @@ fn ewm_mean(v: &[f64], alpha: f64) -> Vec<f64> {
     out
 }
 
-/// `smoothingPoint(type="local")`.
-fn smooth(p: &[P], ts: &[i64], alpha: f64) -> Vec<P> {
+/// `smoothingPoint(type="local", max_gap)`: a step with a gap over `max_gap` is a group of its own
+/// (no smoothing), and the smoothing starts again after it. `None` = smooth all steps.
+fn smooth(p: &[P], ts: &[i64], alpha: f64, max_gap: Option<f64>) -> Vec<P> {
     let n = p.len();
     let mut dt = vec![0f64; n];
     let mut vx = vec![f64::NAN; n];
@@ -299,8 +300,16 @@ fn smooth(p: &[P], ts: &[i64], alpha: f64) -> Vec<P> {
             dt[i] = 1.0;
         }
     }
-    let vx2 = ewm_mean(&vx, alpha);
-    let vy2 = ewm_mean(&vy, alpha);
+    let (mut vx2, mut vy2) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    let big = |i: usize| max_gap.is_some_and(|g| dt[i] > g);
+    let mut start = 0;
+    for i in 1..=n {
+        if i == n || big(i) || big(i - 1) {
+            vx2.extend(ewm_mean(&vx[start..i], alpha));
+            vy2.extend(ewm_mean(&vy[start..i], alpha));
+            start = i;
+        }
+    }
     let mut out = vec![p[0]];
     for i in 0..n - 1 {
         out.push([p[i][0] + dt[i] * vx2[i], p[i][1] + dt[i] * vy2[i]]);
@@ -318,9 +327,10 @@ pub fn enrich(
     min_speed: f64,
     max_speed_for_outlier: f64,
     min_speed_for_bearing: f64,
+    smooth_max_gap: Option<f64>,
 ) -> Result<Rows, String> {
     let (p1, t1) = remove_outlier(x, y, ts, 50.0);
-    let p = smooth(&p1, &t1, alpha);
+    let p = smooth(&p1, &t1, alpha, smooth_max_gap);
     let mut out = Rows::default();
     let mut pc = p[0];
     let mut tc = t1[0];

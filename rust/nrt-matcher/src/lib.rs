@@ -49,6 +49,8 @@ fn clean(
 
 /// `richdata` after the projection. Returns the columns (x, y, timestamp, speed, bearing, stopindex).
 #[pyfunction]
+#[pyo3(signature = (x, y, ts, alpha, min_speed, max_speed_for_outlier, min_speed_for_bearing, smooth_max_gap=None))]
+#[allow(clippy::too_many_arguments)]
 fn enrich(
     x: Vec<f64>,
     y: Vec<f64>,
@@ -57,11 +59,12 @@ fn enrich(
     min_speed: f64,
     max_speed_for_outlier: f64,
     min_speed_for_bearing: f64,
+    smooth_max_gap: Option<f64>,
 ) -> PyResult<RowsOut> {
     if x.is_empty() {
         return Err(err("no observations".into()));
     }
-    c::enrich(&x, &y, &ts, alpha, min_speed, max_speed_for_outlier, min_speed_for_bearing)
+    c::enrich(&x, &y, &ts, alpha, min_speed, max_speed_for_outlier, min_speed_for_bearing, smooth_max_gap)
         .map(rows_out)
         .map_err(err)
 }

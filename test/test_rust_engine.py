@@ -297,6 +297,22 @@ def test_point_weight_engines_equal(data, tmp_path, monkeypatch):
         assert frames_equal(p.matchdf, r.matchdf) == "", t
 
 
+@pytest.mark.parametrize("eng", ["python", "rust"])
+def test_sparse_points_keep_gps_position(data, tmp_path, monkeypatch, eng):
+    """richdata smooths only steps of SMOOTH_MAX_GAP (2 s) or less: on a sparse trace (each 10th
+    point) the points stay at their GPS positions; with SMOOTH_MAX_GAP=None they move."""
+    monkeypatch.chdir(tmp_path)
+    from cleandata import richdata
+    net, gps = data
+    s = gps[gps["trip_id_extended"] == "14010000510059476_0"].sort_values("timestamp").drop_duplicates()
+    sparse = s.iloc[::10].reset_index(drop=True)
+    raw = {int(t): net.convertLonLat2XY(lo, la) for t, lo, la in zip(sparse.timestamp, sparse.lon, sparse.lat)}
+    def shift(df):
+        return max(np.hypot(x - raw[int(t)][0], y - raw[int(t)][1]) for t, x, y in zip(df.timestamp, df.x, df.y))
+    assert shift(richdata(sparse.copy(), net, engine=eng)) < 1e-6
+    assert shift(richdata(sparse.copy(), net, engine=eng, SMOOTH_MAX_GAP=None)) > 1.0
+
+
 def test_reset_quiet_no_file(data, tmp_path, monkeypatch, capsys):
     """reset() clears the path; match() writes no file and prints nothing (only with debug=True)."""
     monkeypatch.chdir(tmp_path)
