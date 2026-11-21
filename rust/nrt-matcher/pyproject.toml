@@ -1,0 +1,14 @@
+[build-system]
+# one abi3 wheel with the top-level module nrt_matcher (the Rust engine of sources/)
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "nrt-matcher"
+version = "0.1.0"
+description = "The Rust engine of the NRTMapMatching map matcher"
+requires-python = ">=3.9"
+
+[tool.maturin]
+module-name = "nrt_matcher"
+profile = "release"

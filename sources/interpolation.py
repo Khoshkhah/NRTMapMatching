@@ -1,6 +1,7 @@
 from geotools import distance2d,calculate_bearing_angle
 import pandas as pd
 import numpy as np
+from engine import use_rust, rust
 
 def Bezier_3(p0,p1,p2,p3,t):
     b0 = (1-t)**3
@@ -136,7 +137,16 @@ def bezierInterpolation(a,b, sample_rate=1):
 
 
 
-def interpolateTrajectory(traj, sample_rate=1):
+def interpolateTrajectory(traj, sample_rate=1, engine=None):
+    if len(traj) >= 3 and use_rust(engine):
+        label, x, y, ts, speed, bearing, origin, stop = rust.interpolate(
+            traj["x"].astype(float).tolist(), traj["y"].astype(float).tolist(),
+            traj["timestamp"].astype(float).tolist(), traj["speed"].astype(float).tolist(),
+            traj["bearing"].astype(float).tolist(), traj["stopindex"].astype("int64").tolist(),
+            float(sample_rate))
+        return pd.DataFrame({"x": x, "y": y, "timestamp": ts, "speed": speed, "bearing": bearing,
+                             "type": ["origin" if o else "extra" for o in origin], "stopindex": stop},
+                            index=label)
     interpol_list = []
     time = traj.iloc[0]["timestamp"]
     a = dict(traj.iloc[0])

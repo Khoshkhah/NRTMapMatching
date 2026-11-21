@@ -1,12 +1,13 @@
 import pandas as pd
 from geotools import distance2d, dfLonLat2XY, calculate_bearing_angle
 import numpy as np
+from engine import use_rust, rust
 
 # Two consecutive stop lables consider as a one stop and the location is somewhere between two tops
 # stopindex=0 it means "moving"
 # observation data must be have all collumns "lon","lat", "timestamp", "speed" and "bearing"
     
-def cleaningData(obs, net,id=0, MINSPEED_FOR_BEARING=1, MAX_SPEED_FOR_OUTLIER=100 ):
+def cleaningData(obs, net,id=0, MINSPEED_FOR_BEARING=1, MAX_SPEED_FOR_OUTLIER=100, engine=None):
 
     # check necessary column in data
     # convert lon,lat to x,y
@@ -24,6 +25,15 @@ def cleaningData(obs, net,id=0, MINSPEED_FOR_BEARING=1, MAX_SPEED_FOR_OUTLIER=10
         return 0
     obs = obs.sort_values("timestamp")
     obs = obs.groupby("timestamp").last().reset_index()
+    if use_rust(engine):
+        xy = [net.convertLonLat2XY(lon, lat) for lon, lat in zip(obs["lon"], obs["lat"])]
+        x, y, ts, speed, bearing, stop = rust.clean(
+            [p[0] for p in xy], [p[1] for p in xy], obs["timestamp"].astype("int64").tolist(),
+            obs["speed"].astype(float).tolist(), obs["bearing"].astype(float).tolist(),
+            MINSPEED_FOR_BEARING, MAX_SPEED_FOR_OUTLIER)
+        return pd.DataFrame({"id": id, "x": x, "y": y, "timestamp": ts, "speed": speed,
+                             "bearing": pd.Series(bearing).astype(obs["bearing"].dtype),
+                             "stopindex": stop})
     output = []
     row_current = obs.iloc[0]
     point_current = net.convertLonLat2XY(row_current["lon"],row_current["lat"])
@@ -161,8 +171,15 @@ def smoothingPoint(obs, alpha=.7, type="local"): #type in {"local", "aggregated"
 # 6 - update bearings based on speeds less than MINSPEED_FOR_BEARING
 # 7 - assing stopindex and fix locations in stop cases
 
-def richdata(obs, net, id=0, alpha=.7, type="local", MIN_SPEED=1, MAX_SPEED_FOR_OUTLIER=50, MINSPEED_FOR_BEARING = 2):
+def richdata(obs, net, id=0, alpha=.7, type="local", MIN_SPEED=1, MAX_SPEED_FOR_OUTLIER=50, MINSPEED_FOR_BEARING = 2,
+             engine=None):
     df = dfLonLat2XY(obs, net)
+    if type == "local" and use_rust(engine):
+        x, y, ts, speed, bearing, stop = rust.enrich(
+            df["x"].tolist(), df["y"].tolist(), df["timestamp"].astype("int64").tolist(),
+            alpha, MIN_SPEED, MAX_SPEED_FOR_OUTLIER, MINSPEED_FOR_BEARING)
+        return pd.DataFrame({"id": id, "x": x, "y": y, "timestamp": ts, "speed": speed,
+                             "bearing": bearing, "stopindex": stop})
     df1 = removeOutlier(df)
     df2 = smoothingPoint(df1, alpha=alpha, type=type)
     
