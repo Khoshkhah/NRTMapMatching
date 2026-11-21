@@ -59,7 +59,9 @@ class MapMatcher:
                  MAX_RUNNING_TIME=5,
                  engine=None,
                  debug=False,
-                 BEAM_WIDTH=5):
+                 BEAM_WIDTH=20,
+                 W_BEARING=1, W_DIST=30, W_AIR=10, W_ROAD=5, W_REVERSE=100000,
+                 INTERP_WEIGHT=1.0):
         
         if not isinstance(net, network.Net):
             raise ValueError("network.Net expected")
@@ -82,6 +84,12 @@ class MapMatcher:
         self.engine = engine  # "auto", "rust" or "python"; see engine.py
         self.debug = debug    # True: write new_sample.csv and print the path
         self.BEAM_WIDTH = BEAM_WIDTH  # the number of hypotheses that the matcher keeps
+        # the weights of the cost (see cost_calculate)
+        self.W_BEARING, self.W_DIST, self.W_AIR, self.W_ROAD, self.W_REVERSE = W_BEARING, W_DIST, W_AIR, W_ROAD, W_REVERSE
+        # the weight factor of a point in the middle of an interpolated gap (column confidence = 0); a
+        # real GPS point has 1. The factor multiplies the bearing, distance and air distance terms.
+        # 1 = all points have the same weight.
+        self.INTERP_WEIGHT = INTERP_WEIGHT
         
         
     
@@ -129,7 +137,15 @@ class MapMatcher:
     
     
     
-    def cost_calculate(self, bearing_error, match_point_distance, air_distance_error, road_distance_error, reverse):
+    def point_weights(self, sample_gps):
+        """The weight factor of each point: INTERP_WEIGHT + (1 - INTERP_WEIGHT) x confidence (1 without the column)."""
+        if "confidence" not in sample_gps:
+            return [1.0] * len(sample_gps)
+        w = float(self.INTERP_WEIGHT)
+        return [w + (1.0 - w) * float(c) for c in sample_gps["confidence"]]
+
+    def cost_calculate(self, bearing_error, match_point_distance, air_distance_error, road_distance_error, reverse,
+                       weight=1.0):
         """
         Calculates the cost for a match point based on different error values.
 
@@ -145,8 +161,9 @@ class MapMatcher:
         """
         cost = 0
         if reverse == True:
-            cost+= 100000
-        cost+= 1*bearing_error + 30*match_point_distance  + 10*air_distance_error  +5*road_distance_error
+            cost+= self.W_REVERSE
+        cost+= (self.W_BEARING*bearing_error*weight + self.W_DIST*match_point_distance*weight
+                + self.W_AIR*air_distance_error*weight + self.W_ROAD*road_distance_error)
         return  cost
 
     
@@ -229,8 +246,8 @@ class MapMatcher:
         if use_rust(self.engine):
             return self._match_rust(sample_gps)
         beam = []
-        for index, row in sample_gps.iterrows():
-            beam = self.step(beam, index, row)
+        for (index, row), w in zip(sample_gps.iterrows(), self.point_weights(sample_gps)):
+            beam = self.step(beam, index, row, w)
         best = beam[0] if beam else _Hyp(0.0, None, False, None, None, None)
         self.path = [{"edge": e, "reverse": r, "length": l} for e, r, l in _unlink(best.path)]
         self.matchdf = pd.DataFrame(_unlink(best.matched))
@@ -243,7 +260,7 @@ class MapMatcher:
             self._index = {e: i for i, e in enumerate(self.net._edgeidlist)}
         return self._index[edge.getID()]
 
-    def step(self, beam, index, row):
+    def step(self, beam, index, row, weight=1.0):
         """One point of the beam search: returns the new beam (sorted by total cost)."""
         children = []
         for h in beam:
@@ -257,13 +274,13 @@ class MapMatcher:
                 if decision == "NODECISION":
                     edges.add(h.edge)
                     reversedict[h.edge] = h.rev
-            children += self._extend(h, index, row, decision, edges, reversedict)
+            children += self._extend(h, index, row, decision, edges, reversedict, weight)
         if not children:
             # no hypothesis can continue: start again from the edges near the point (a gap)
             base = beam[0] if beam else _Hyp(0.0, None, False, None, None, None)
             start = _Hyp(base.cost, None, False, None, base.path, base.matched)
             edges, reversedict = self.first_point_matching(row.x, row.y)
-            children = self._extend(start, index, row, "CHANGE", edges, reversedict)
+            children = self._extend(start, index, row, "CHANGE", edges, reversedict, weight)
             if not children:
                 return beam  # no edge near the point: skip it
         children.sort(key=lambda c: c.cost)
@@ -276,7 +293,7 @@ class MapMatcher:
                     break
         return out
 
-    def _extend(self, h, index, row, decision, edges, reversedict):
+    def _extend(self, h, index, row, decision, edges, reversedict, weight=1.0):
         """The children of hypothesis h on the candidate edges (in the sequence of net._edgeidlist)."""
         out = []
         x, y = row.x, row.y
@@ -308,7 +325,7 @@ class MapMatcher:
             predict_distance = float(row.speed) * 1
             matched_road_distance = road_distance(edge, offset, lastedge, lastoffset, last_edge_length)
             rd = abs(matched_road_distance - predict_distance)
-            cost = self.cost_calculate(dist_bearing, dist, cost_air, rd, rev)
+            cost = self.cost_calculate(dist_bearing, dist, cost_air, rd, rev, weight)
             rec = {"index": index, "timestamp": row.timestamp, "x": matchpoint[0], "y": matchpoint[1],
                    "bearing": row.bearing, "rd": rd, "dist": dist,
                    "from_edge": temp_edge.getID() if temp_edge is not None else None,
@@ -333,10 +350,13 @@ class MapMatcher:
         rnet = rust_network(self.net)
         ids = self.net._edgeidlist
         m = rust.Matcher(rnet, self.MAX_GPS_ERROR, self.MAX_MAP_ERROR, self.MAP_ONE_WAY_FIX,
-                         self.U_TURN_ON_ONEWAY, self.LOOP, self.DIFF_GPS_ERROR, beam_width=self.BEAM_WIDTH)
+                         self.U_TURN_ON_ONEWAY, self.LOOP, self.DIFF_GPS_ERROR, beam_width=self.BEAM_WIDTH,
+                         w_bearing=float(self.W_BEARING), w_dist=float(self.W_DIST), w_air=float(self.W_AIR),
+                         w_road=float(self.W_ROAD), w_reverse=float(self.W_REVERSE))
         m.match_trace(sample_gps.index.astype("int64").tolist(),
                       sample_gps["x"].astype(float).tolist(), sample_gps["y"].astype(float).tolist(),
-                      sample_gps["speed"].astype(float).tolist(), sample_gps["bearing"].astype(float).tolist())
+                      sample_gps["speed"].astype(float).tolist(), sample_gps["bearing"].astype(float).tolist(),
+                      self.point_weights(sample_gps))
         self.path = [{"edge": self.net.getEdge(ids[e]), "reverse": rev, "length": length}
                      for e, rev, length in m.path()]
         r = m.result()

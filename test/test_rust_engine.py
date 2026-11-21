@@ -103,6 +103,13 @@ def compare_trip(net, s):
         return {k: v for k, v in out.items() if v}
     out["interpolate"] = frames_equal(ip, ir)
 
+    # the road interpolation on a sparse trace (each 10th point), so that the gaps are long
+    sparse = cp.iloc[::10].reset_index(drop=True)
+    if len(sparse) >= 2:
+        qp, ep = run(lambda: interpolateTrajectory(sparse, net=net, engine="python"))
+        qr, er = run(lambda: interpolateTrajectory(sparse, net=net, engine="rust"))
+        out["road"] = (f"error {ep!r} / {er!r}" if ep != er else "") if ep or er else frames_equal(qp, qr)
+
     # both matchers read the same input: the Python interpolation
     mp, mr = MapMatcher(net, engine="python"), MapMatcher(net, engine="rust")
     okp, ep = run(lambda: mp.match(ip.copy()))
@@ -227,6 +234,67 @@ def test_engines_equal_fault_trips(data, tmp_path, monkeypatch):
         s = gps[gps["trip_id_extended"] == t].sort_values("timestamp").drop_duplicates()
         d = {k: v for k, v in compare_trip(net, s).items() if not k.startswith("_")}
         assert not d, (t, d)
+
+
+def _near_edge(net, df, r=5.0):
+    """The share of the points that are within r metres of an edge."""
+    return sum(1 for x, y in zip(df.x, df.y) if net.getNeighboringEdges(x, y, r)) / len(df)
+
+
+@pytest.mark.parametrize("eng", ["python", "rust"])
+def test_road_interpolation_on_the_road(data, tmp_path, monkeypatch, eng):
+    """On a sparse trace, the road interpolation puts the points of the long gaps on the roads;
+    the Bezier curve cuts across. Short gaps and the GPS points stay as in the Bezier curve."""
+    monkeypatch.chdir(tmp_path)
+    from cleandata import cleaningData
+    from interpolation import interpolateTrajectory
+    net, gps = data
+    s = gps[gps["trip_id_extended"] == "14010000510059476_0"].sort_values("timestamp").drop_duplicates()
+    sparse = cleaningData(s, net, engine="python").iloc[::10].reset_index(drop=True)
+    bez = interpolateTrajectory(sparse, engine=eng)
+    road = interpolateTrajectory(sparse, net=net, engine=eng)
+    assert road.timestamp.is_monotonic_increasing and road.timestamp.iloc[-1] == sparse.timestamp.iloc[-1]
+    assert set(sparse.timestamp) <= set(road.timestamp)
+    assert _near_edge(net, road) > _near_edge(net, bez) + 0.1
+
+
+@pytest.mark.parametrize("eng", ["python", "rust"])
+def test_confidence_and_point_weight(data, tmp_path, monkeypatch, eng):
+    """interpolateTrajectory adds confidence (1 at the GPS points, 0 in the middle of a gap);
+    INTERP_WEIGHT=1 gives the same match as no confidence column."""
+    monkeypatch.chdir(tmp_path)
+    from cleandata import cleaningData
+    from interpolation import interpolateTrajectory
+    from mapmatching import MapMatcher
+    net, gps = data
+    s = gps[gps["trip_id_extended"] == "14010000510059476_0"].sort_values("timestamp").drop_duplicates()
+    road = interpolateTrajectory(cleaningData(s, net, engine="python").iloc[::10].reset_index(drop=True),
+                                 net=net, engine=eng)
+    c = road["confidence"]
+    assert (c[road["type"] == "origin"] == 1).all() and c.min() == 0 and c.between(0, 1).all()
+    a, b = MapMatcher(net, engine=eng), MapMatcher(net, engine=eng)
+    a.match(road)
+    b.match(road.drop(columns="confidence"))
+    assert a.matchdf["edgeid"].tolist() == b.matchdf["edgeid"].tolist()
+    w = MapMatcher(net, engine=eng, INTERP_WEIGHT=0.3)
+    assert w.match(road) == 1 and len(w.matchdf) == len(road)
+
+
+def test_point_weight_engines_equal(data, tmp_path, monkeypatch):
+    """With INTERP_WEIGHT < 1 both engines give the same match."""
+    monkeypatch.chdir(tmp_path)
+    from cleandata import cleaningData
+    from interpolation import interpolateTrajectory
+    from mapmatching import MapMatcher
+    net, gps = data
+    for t in ["14010000510059476_0", "14010000510061335_0"]:
+        s = gps[gps["trip_id_extended"] == t].sort_values("timestamp").drop_duplicates()
+        road = interpolateTrajectory(cleaningData(s, net, engine="python").iloc[::8].reset_index(drop=True),
+                                     net=net, engine="python")
+        p, r = MapMatcher(net, engine="python", INTERP_WEIGHT=0.3), MapMatcher(net, engine="rust", INTERP_WEIGHT=0.3)
+        p.match(road.copy())
+        r.match(road.copy())
+        assert frames_equal(p.matchdf, r.matchdf) == "", t
 
 
 def test_reset_quiet_no_file(data, tmp_path, monkeypatch, capsys):
