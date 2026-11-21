@@ -73,9 +73,18 @@ MapMatcher(net, MAX_GPS_ERROR=60, MAX_MAP_ERROR=40,
 #### `MAX_RUNNING_TIME` (default: 5)
 - **Note**: Not used since the beam search (2026-11-21): the matcher does a fixed maximum of work for each point.
 
-#### `BEAM_WIDTH` (default: 5)
+#### `BEAM_WIDTH` (default: 20)
 - **Type**: int
 - **Description**: The number of hypotheses that the beam search keeps. 1 keeps only the best hypothesis (a greedy match).
+
+#### `W_BEARING`, `W_DIST`, `W_AIR`, `W_ROAD`, `W_REVERSE` (defaults: 1, 30, 10, 5, 100000)
+- **Description**: The weights of the cost of a candidate edge: bearing error, distance to the edge, air distance error, road distance error, and the penalty for an edge in the reverse direction.
+
+#### `INTERP_WEIGHT` (default: 1)
+- **Description**: The weight factor of a point in the middle of an interpolated gap (column `confidence` = 0). A point gets `INTERP_WEIGHT + (1 - INTERP_WEIGHT) × confidence` on its bearing, distance and air distance terms. 1 = all points have the same weight.
+
+#### `interpolateTrajectory(traj, sample_rate=1, net=None, ROAD_MIN_GAP=6, ROAD_DETOUR_FACTOR=2, ROAD_DETOUR_M=100)`
+- **net**: with a `network.Net`, a gap of `ROAD_MIN_GAP` seconds or more goes along the shortest road path (road interpolation). A path longer than `ROAD_DETOUR_FACTOR` × the straight distance + `ROAD_DETOUR_M` gets the Bezier curve.
 
 #### `engine` (default: None) and `debug` (default: False)
 - **engine**: `"auto"`, `"rust"` or `"python"`; `None` uses the environment variable `NRT_ENGINE`, else `"auto"` (Rust when `nrt_matcher` is installed).

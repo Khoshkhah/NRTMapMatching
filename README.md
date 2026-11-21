@@ -70,7 +70,7 @@ For online use, `nrt_matcher.Matcher.push(x, y, speed, bearing)` matches one new
 
 ### The matcher: a beam search (since 2026-11-21)
 
-`MapMatcher.match` keeps at most `BEAM_WIDTH` hypotheses (default 5). A hypothesis is a path, its last matched point and its total cost. For each point, the matcher extends each hypothesis to its candidate edges: stay on the edge, change to an outgoing edge, or both. The speed and the rest of the edge select the candidates. The cost of a candidate is the cost of the old matcher (bearing, distance, air distance, road distance, reverse direction). The matcher does not use a candidate that is farther than `MAX_GPS_ERROR + MAX_MAP_ERROR` from the point. The `BEAM_WIDTH` children with the lowest total cost stay, at most one for each edge and direction. If no hypothesis can continue, the match starts again from the edges near the point. If no edge is near the point, the matcher skips the point. The result is the hypothesis with the lowest total cost.
+`MapMatcher.match` keeps at most `BEAM_WIDTH` hypotheses (default 20). A hypothesis is a path, its last matched point and its total cost. For each point, the matcher extends each hypothesis to its candidate edges: stay on the edge, change to an outgoing edge, or both. The speed and the rest of the edge select the candidates. The cost of a candidate is the cost of the old matcher (bearing, distance, air distance, road distance, reverse direction). The matcher does not use a candidate that is farther than `MAX_GPS_ERROR + MAX_MAP_ERROR` from the point. The `BEAM_WIDTH` children with the lowest total cost stay, at most one for each edge and direction. If no hypothesis can continue, the match starts again from the edges near the point. If no edge is near the point, the matcher skips the point. The result is the hypothesis with the lowest total cost.
 
 The old matcher kept a full tree of decision points and stepped back when a point was too far from the edge. It had these faults, which the beam search does not have (one test for each fault in `test/test_rust_engine.py`):
 
@@ -84,28 +84,37 @@ Also, `reset()` clears the path, and `match()` writes `new_sample.csv` and print
 
 **Equal results.** `test/test_rust_engine.py` runs both engines on trips of `data/gps_inside_island.zip`. On 400 trips (304,743 matched points), all four stages give the same rows. Each point gets the same edge, and the largest difference in a number is 4e-12. Each point of each trip has a match.
 
-**Monaco test** (600 simulated traces on 50 routes, intervals 1, 5, 15 and 30 s, GPS noise 3, 10 and 20 m; both engines give the same path on all 600 traces):
+### Road interpolation (since 2026-11-21)
 
-| Interval | Recall, old → beam | Precision, old → beam | No route, old → beam |
+`interpolateTrajectory(traj, net=net)` puts the points of a long gap (`ROAD_MIN_GAP`, default 6 s or more) along the shortest road path between the two GPS points, at constant speed. The path starts and ends on one of the 3 nearest edges (within 50 m) of each GPS point. If the path is longer than `ROAD_DETOUR_FACTOR` (2) × the straight distance + `ROAD_DETOUR_M` (100 m), for example because of GPS noise, or if no path is found, the gap gets the Bezier curve. Shorter gaps and stops also get the Bezier curve. Without `net`, the function uses only the Bezier curve, as before.
+
+The Bezier curve cannot know where the road turns between two GPS points that are far apart. On the Monaco traces at 30 s, with GPS noise of only 3 m, the Bezier points are 28 m from the true route on average, and 52 % are more than 20 m away. With the road interpolation, the error at 15 s goes down from 18.6 m to 8.8 m, and at 30 s from 28.5 m to 17.9 m.
+
+`interpolateTrajectory` also adds the column `confidence`: 1 at a GPS point, down to 0 in the middle of a gap. `MapMatcher(INTERP_WEIGHT=...)` multiplies the bearing, distance and air distance terms of a point by `INTERP_WEIGHT + (1 - INTERP_WEIGHT) × confidence`. The default 1 gives all points the same weight. On Monaco, no value and no other shape of this weight (square, step, a higher weight for the GPS points) changed the score by more than 0.003, so it stays off.
+
+The cost weights are parameters: `W_BEARING` (1), `W_DIST` (30), `W_AIR` (10), `W_ROAD` (5), `W_REVERSE` (100000). A search of 1000 weight sets on half of the Monaco routes did not give better scores on the other half. The beam width had the effect: 20 is better than 5, and 50 or 100 give no more gain.
+
+**Monaco test** (600 simulated traces on 50 routes, intervals 1, 5, 15 and 30 s, GPS noise 3, 10 and 20 m; both engines give the same path on all 600 traces). "Old" is the backtracking matcher; "new" is the beam search with `BEAM_WIDTH=20` and the road interpolation:
+
+| Interval | Recall, old → new | Precision, old → new | No route, old → new |
 |---|---|---|---|
-| 1 s | 0.28 → 0.95 | 0.33 → 0.91 | 61 % → 0 % |
-| 5 s | 0.23 → 0.89 | 0.26 → 0.90 | 68 % → 0 % |
-| 15 s | 0.20 → 0.65 | 0.22 → 0.74 | 71 % → 0 % |
-| 30 s | 0.06 → 0.42 | 0.07 → 0.56 | 87 % → 0 % |
+| 1 s | 0.28 → 0.97 | 0.33 → 0.92 | 61 % → 0 % |
+| 5 s | 0.23 → 0.94 | 0.26 → 0.94 | 68 % → 0 % |
+| 15 s | 0.20 → 0.86 | 0.22 → 0.84 | 71 % → 0 % |
+| 30 s | 0.06 → 0.69 | 0.07 → 0.69 | 87 % → 0 % |
+| All | 0.19 → 0.87 | 0.22 → 0.85 | 72 % → 0 % |
 
-The matcher moves at most one edge for each interpolated 1 s point, so its scores are lower at long intervals.
-
-**Speed** (`python test/bench_rust_engine.py 200`, Apple M6, 200 trips, 143,826 points at 1 s):
+**Speed** (`python test/bench_rust_engine.py 200`, Apple M6, 200 trips, 143,826 points at 1 s, `BEAM_WIDTH=20`):
 
 | Stage | Python, ms per trip | Rust, ms per trip | Faster by |
 |---|---:|---:|---:|
-| `cleaningData` | 6.0 | 0.81 | 7× |
-| `richdata` | 15.6 | 2.0 | 8× |
-| `interpolateTrajectory` | 36.6 | 0.53 | 69× |
-| `MapMatcher.match` | 108.0 | 1.3 | 81× |
-| Rust matcher only (`Matcher.match_trace`) | | 0.42 | 256× |
+| `cleaningData` | 6.2 | 0.87 | 7× |
+| `richdata` | 15.7 | 2.0 | 8× |
+| `interpolateTrajectory` (Bezier) | 38.8 | 0.67 | 58× |
+| `MapMatcher.match` | 264 | 2.2 | 123× |
+| Rust matcher only (`Matcher.match_trace`) | | 1.2 | 226× |
 
-The time for each new point: Python 181 µs (the trace time divided by the points), Rust `push` 1.7 µs (median), 7.5 µs (p99), 100 µs (maximum). In `cleaningData` and `richdata`, most of the Rust time is the pandas steps and the projection, which stay in Python.
+The time for each new point: Python 471 µs (the trace time divided by the points), Rust `push` 3.5 µs (median), 10 µs (p99), 128 µs (maximum). In `cleaningData` and `richdata`, most of the Rust time is the pandas steps and the projection, which stay in Python.
 
 ## Documentation
 

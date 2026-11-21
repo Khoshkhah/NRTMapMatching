@@ -112,6 +112,11 @@ impl Network {
         Ok(Network(Arc::new(c::Network::new(shapes, speed, from_node, to_node, node_out, node_in))))
     }
 
+    /// `RoadPath.polyline((ax, ay), (bx, by))`: the road polyline between two points, or None.
+    fn road_polyline(&self, ax: f64, ay: f64, bx: f64, by: f64) -> Option<Vec<(f64, f64)>> {
+        self.0.road_polyline([ax, ay], [bx, by]).map(|v| v.into_iter().map(|p| (p[0], p[1])).collect())
+    }
+
     /// `Net.getNeighboringEdges(x, y, r)`: [(edge index, distance)], sorted by edge index.
     fn neighboring_edges(&self, x: f64, y: f64, r: f64) -> Vec<(usize, f64)> {
         self.0.neighboring_edges(x, y, r)
@@ -126,7 +131,8 @@ struct Matcher(c::Matcher);
 impl Matcher {
     #[new]
     #[pyo3(signature = (network, max_gps_error, max_map_error, map_one_way_fix, u_turn_on_oneway, loop_,
-                        diff_gps_error, beam_width=5))]
+                        diff_gps_error, beam_width=20, w_bearing=1.0, w_dist=30.0, w_air=10.0, w_road=5.0,
+                        w_reverse=100000.0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         network: &Network,
@@ -137,6 +143,11 @@ impl Matcher {
         loop_: bool,
         diff_gps_error: f64,
         beam_width: usize,
+        w_bearing: f64,
+        w_dist: f64,
+        w_air: f64,
+        w_road: f64,
+        w_reverse: f64,
     ) -> PyResult<Self> {
         if beam_width == 0 {
             return Err(err("beam_width must be 1 or more".into()));
@@ -149,11 +160,19 @@ impl Matcher {
             loop_,
             diff_gps_error,
             beam_width,
+            w_bearing,
+            w_dist,
+            w_air,
+            w_road,
+            w_reverse,
         };
         Ok(Matcher(c::Matcher::new(Arc::clone(&network.0), p)))
     }
 
-    /// Match a full trace. `labels` is the DataFrame index. Returns 1.
+    /// Match a full trace. `labels` is the DataFrame index; `weights` the weight factor of each
+    /// point (`MapMatcher.point_weights`; None = 1 for all). Returns 1.
+    #[pyo3(signature = (labels, x, y, speed, bearing, weights=None))]
+    #[allow(clippy::too_many_arguments)]
     fn match_trace(
         &mut self,
         py: Python<'_>,
@@ -162,22 +181,26 @@ impl Matcher {
         y: Vec<f64>,
         speed: Vec<f64>,
         bearing: Vec<f64>,
+        weights: Option<Vec<f64>>,
     ) -> PyResult<i32> {
         let n = x.len();
-        if labels.len() != n || y.len() != n || speed.len() != n || bearing.len() != n {
+        let w = weights.unwrap_or_else(|| vec![1.0; n]);
+        if labels.len() != n || y.len() != n || speed.len() != n || bearing.len() != n || w.len() != n {
             return Err(err("the point arrays do not agree".into()));
         }
         let pts = (0..n)
-            .map(|i| c::Pt { label: labels[i], x: x[i], y: y[i], speed: speed[i], bearing: bearing[i] })
+            .map(|i| c::Pt { label: labels[i], x: x[i], y: y[i], speed: speed[i], bearing: bearing[i], w: w[i] })
             .collect();
         let m = &mut self.0;
         py.detach(|| m.match_trace(pts)).map_err(err)?;
         Ok(1)
     }
 
-    /// Add one point and match it. Returns the number of matched points of the best hypothesis.
-    fn push(&mut self, x: f64, y: f64, speed: f64, bearing: f64) -> PyResult<usize> {
-        self.0.push(x, y, speed, bearing).map_err(err)?;
+    /// Add one point and match it (`weight`: the weight factor of the point). Returns the number of
+    /// matched points of the best hypothesis.
+    #[pyo3(signature = (x, y, speed, bearing, weight=1.0))]
+    fn push(&mut self, x: f64, y: f64, speed: f64, bearing: f64, weight: f64) -> PyResult<usize> {
+        self.0.push(x, y, speed, bearing, weight).map_err(err)?;
         Ok(self.0.matched_len())
     }
 
@@ -224,11 +247,41 @@ impl Matcher {
     }
 }
 
+/// `interpolateTrajectory(traj, net=net)` (road interpolation). Returns (index labels, x, y,
+/// timestamp, speed, bearing, origin, stopindex).
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn interpolate_road(
+    network: &Network,
+    x: Vec<f64>,
+    y: Vec<f64>,
+    ts: Vec<f64>,
+    speed: Vec<f64>,
+    bearing: Vec<f64>,
+    stop: Vec<i64>,
+    sample_rate: f64,
+    min_gap: f64,
+    detour_factor: f64,
+    detour_m: f64,
+) -> PyResult<(Vec<i64>, Vec<f64>, Vec<f64>, Vec<i64>, Vec<f64>, Vec<f64>, Vec<bool>, Vec<i64>)> {
+    let n = x.len();
+    if y.len() != n || ts.len() != n || speed.len() != n || bearing.len() != n || stop.len() != n {
+        return Err(err("the point arrays do not agree".into()));
+    }
+    if !(sample_rate > 0.0) {
+        return Err(err("sample_rate must be more than 0".into()));
+    }
+    let rp = c::RoadParams { min_gap, detour_factor, detour_m };
+    let r = c::interpolate_road(&network.0, &x, &y, &ts, &speed, &bearing, &stop, sample_rate, rp);
+    Ok((r.label, r.x, r.y, r.ts, r.speed, r.bearing, r.origin, r.stop))
+}
+
 #[pymodule]
 fn nrt_matcher(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clean, m)?)?;
     m.add_function(wrap_pyfunction!(enrich, m)?)?;
     m.add_function(wrap_pyfunction!(interpolate, m)?)?;
+    m.add_function(wrap_pyfunction!(interpolate_road, m)?)?;
     m.add_class::<Network>()?;
     m.add_class::<Matcher>()?;
     Ok(())

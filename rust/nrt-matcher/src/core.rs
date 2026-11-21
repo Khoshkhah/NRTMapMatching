@@ -529,6 +529,8 @@ pub struct Network {
     pub to: Vec<usize>,
     pub node_out: Vec<Vec<usize>>,
     pub node_in: Vec<Vec<usize>>,
+    /// `polyLength` of each edge shape (the road interpolation).
+    pub length: Vec<f64>,
     tree: RTree<GeomWithData<Rectangle<P>, usize>>,
 }
 
@@ -554,7 +556,8 @@ impl Network {
                 GeomWithData::new(Rectangle::from_corners(lo, hi), i)
             })
             .collect();
-        Network { shapes, speed, from, to, node_out, node_in, tree: RTree::bulk_load(boxes) }
+        let length = shapes.iter().map(|s| poly_len(s)).collect();
+        Network { shapes, speed, from, to, node_out, node_in, length, tree: RTree::bulk_load(boxes) }
     }
 
     /// `Net.getNeighboringEdges(x, y, r)`: the edges nearer than `r`, sorted by edge index.
@@ -594,6 +597,206 @@ impl Network {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Road interpolation (interpolation.py, roadInterpolation): the points of a long gap go along the
+// shortest road path
+// ---------------------------------------------------------------------------------------------
+
+const SNAP_RADIUS: f64 = 50.0;
+const SNAP_COUNT: usize = 3;
+
+#[derive(Clone, Copy, Debug)]
+pub struct RoadParams {
+    pub min_gap: f64,
+    pub detour_factor: f64,
+    pub detour_m: f64,
+}
+
+/// `_cut`: the shape points after the offset lo, up to the offset hi.
+fn cut(shape: &[P], lo: f64, hi: f64, out: &mut Vec<P>) {
+    let mut acc = 0.0;
+    for w in shape.windows(2) {
+        let d = dist(w[0], w[1]);
+        if acc + d > lo && acc < hi && acc + d <= hi {
+            out.push(w[1]);
+        }
+        acc += d;
+    }
+}
+
+/// `_along`: the point and the bearing at the distance s along a polyline.
+fn along(poly: &[P], s: f64) -> (P, f64) {
+    let mut acc = 0.0;
+    for w in poly.windows(2) {
+        let d = dist(w[0], w[1]);
+        if d > 0.0 && acc + d >= s {
+            let f = (s - acc) / d;
+            return ([w[0][0] + f * (w[1][0] - w[0][0]), w[0][1] + f * (w[1][1] - w[0][1])], bearing(w[0], w[1]));
+        }
+        acc += d;
+    }
+    let n = poly.len();
+    (poly[n - 1], bearing(poly[n - 2], poly[n - 1]))
+}
+
+impl Network {
+    /// `RoadPath.snap`: the nearest edges (distance, edge, offset, point on the edge), sorted by (distance, edge).
+    fn snap(&self, p: P) -> Vec<(f64, usize, f64, P)> {
+        let mut v: Vec<(f64, usize, f64, P)> = self
+            .neighboring_edges(p[0], p[1], SNAP_RADIUS)
+            .into_iter()
+            .map(|(e, _)| {
+                let (off, q) = poly_offset(p, &self.shapes[e]);
+                (dist(p, q), e, off, q)
+            })
+            .collect();
+        // the two directions of a road are at the same distance; the last bit of the distance can
+        // differ between Python and Rust, so the sort uses the distance in micrometres, then the edge index
+        v.sort_by_key(|c| ((c.0 * 1e6 + 0.5).floor() as i64, c.1));
+        v.truncate(SNAP_COUNT);
+        v
+    }
+
+    /// `RoadPath.node_path`: (length, edges) from the end of ea to the start of eb, or None.
+    /// The heap order is (distance, push number), as in the Python heapq.
+    fn node_path(&self, ea: usize, eb: usize, limit: f64) -> Option<(f64, Vec<usize>)> {
+        use std::cmp::Reverse;
+        use std::collections::{BinaryHeap, HashMap};
+        let (src, dst) = (self.to[ea], self.from[eb]);
+        if src == dst {
+            return Some((0.0, Vec::new()));
+        }
+        let mut dist_of: HashMap<usize, f64> = HashMap::from([(src, 0.0)]);
+        let mut prev: HashMap<usize, usize> = HashMap::new();
+        // the distances are 0 or more, so the bits of the f64 sort as the numbers
+        let mut heap = BinaryHeap::from([Reverse((0f64.to_bits(), 0u64, src))]);
+        let mut n = 1u64;
+        while let Some(Reverse((db, _, u))) = heap.pop() {
+            let d = f64::from_bits(db);
+            if d > *dist_of.get(&u).unwrap_or(&f64::INFINITY) || d > limit {
+                continue;
+            }
+            if u == dst {
+                let mut edges = Vec::new();
+                let mut w = u;
+                while let Some(&e) = prev.get(&w) {
+                    edges.push(e);
+                    w = self.from[e];
+                }
+                edges.reverse();
+                return Some((d, edges));
+            }
+            for &e in &self.node_out[u] {
+                let (v, nd) = (self.to[e], d + self.length[e]);
+                if nd < *dist_of.get(&v).unwrap_or(&f64::INFINITY) {
+                    dist_of.insert(v, nd);
+                    prev.insert(v, e);
+                    n += 1;
+                    heap.push(Reverse((nd.to_bits(), n, v)));
+                }
+            }
+        }
+        None
+    }
+
+    /// `RoadPath.polyline`: the road polyline from near a to near b, or None.
+    pub fn road_polyline(&self, a: P, b: P) -> Option<Vec<P>> {
+        let air = dist(a, b);
+        let limit = (3.0 * air).max(air + 300.0);
+        let mut best: Option<(f64, usize, f64, P, usize, f64, P, Option<Vec<usize>>)> = None;
+        let sb = self.snap(b);
+        for &(da, ea, oa, qa) in &self.snap(a) {
+            for &(db, eb, ob, qb) in &sb {
+                let (length, mid) = if ea == eb && ob >= oa {
+                    (ob - oa, None)
+                } else {
+                    match self.node_path(ea, eb, limit) {
+                        Some((l, m)) => ((self.length[ea] - oa) + l + ob, Some(m)),
+                        None => continue,
+                    }
+                };
+                let score = length + 2.0 * (da + db);
+                if best.as_ref().map_or(true, |bb| score < bb.0) {
+                    best = Some((score, ea, oa, qa, eb, ob, qb, mid));
+                }
+            }
+        }
+        let (_, ea, oa, qa, eb, ob, qb, mid) = best?;
+        let mut core = vec![qa];
+        match mid {
+            None => cut(&self.shapes[ea], oa, ob, &mut core),
+            Some(m) => {
+                cut(&self.shapes[ea], oa, f64::INFINITY, &mut core);
+                for e in m {
+                    core.extend_from_slice(&self.shapes[e][1..]);
+                }
+                cut(&self.shapes[eb], 0.0, ob, &mut core);
+            }
+        }
+        core.push(qb);
+        core.dedup();
+        (core.len() > 1).then_some(core)
+    }
+}
+
+/// `roadInterpolation`: the Bezier interpolation, but a gap of `min_gap` seconds or more goes
+/// along the shortest road path (when it is no detour). The labels are the positions.
+#[allow(clippy::too_many_arguments)]
+pub fn interpolate_road(
+    net: &Network,
+    x: &[f64],
+    y: &[f64],
+    ts: &[f64],
+    speed: &[f64],
+    brg: &[f64],
+    stop: &[i64],
+    sr: f64,
+    rp: RoadParams,
+) -> Interp {
+    let n = x.len();
+    let mut out = Interp::default();
+    for i in 0..n.saturating_sub(1) {
+        let (a, b, dt) = ([x[i], y[i]], [x[i + 1], y[i + 1]], ts[i + 1] - ts[i]);
+        let mut poly = None;
+        if !(stop[i] > 0 && stop[i + 1] > 0) && dt >= rp.min_gap {
+            poly = net.road_polyline(a, b);
+            if poly.as_ref().is_some_and(|p| poly_len(p) > rp.detour_factor * dist(a, b) + rp.detour_m) {
+                poly = None;
+            }
+        }
+        match poly {
+            None => {
+                let ka = Knot { p: a, ts: ts[i], speed: speed[i], bearing: brg[i], stop: stop[i] };
+                let kb = Knot { p: b, ts: ts[i + 1], speed: speed[i + 1], bearing: brg[i + 1], stop: stop[i + 1] };
+                let mut seg = Interp::default();
+                bezier_segment(ka, kb, sr, &mut seg);
+                for k in 0..seg.x.len() {
+                    if (seg.ts[k] as f64) < ts[i + 1] {
+                        out.push([seg.x[k], seg.y[k]], seg.ts[k], seg.speed[k], seg.bearing[k], seg.origin[k], seg.stop[k]);
+                    }
+                }
+            }
+            Some(poly) => {
+                let length = poly_len(&poly);
+                let mut k = 0.0;
+                while k * sr < dt {
+                    let (mut q, br) = along(&poly, length * (k * sr) / dt);
+                    if k == 0.0 {
+                        q = a; // the GPS point stays; it gets the bearing of the road
+                    }
+                    out.push(q, (ts[i] + k * sr) as i64, length / dt, br, k == 0.0, 0);
+                    k += 1.0;
+                }
+            }
+        }
+    }
+    if n > 0 {
+        out.push([x[n - 1], y[n - 1]], ts[n - 1] as i64, speed[n - 1], brg[n - 1], true, stop[n - 1]);
+    }
+    out.label = (0..out.x.len() as i64).collect();
+    out
+}
+
+// ---------------------------------------------------------------------------------------------
 // MapMatcher.match (mapmatching.py): a beam search
 // ---------------------------------------------------------------------------------------------
 
@@ -607,6 +810,13 @@ pub struct Params {
     pub diff_gps_error: f64,
     /// The number of hypotheses that the matcher keeps (`BEAM_WIDTH`).
     pub beam_width: usize,
+    /// The weights of the cost: bearing error, distance to the edge, air distance error, road
+    /// distance error, and the penalty for an edge in the reverse direction.
+    pub w_bearing: f64,
+    pub w_dist: f64,
+    pub w_air: f64,
+    pub w_road: f64,
+    pub w_reverse: f64,
 }
 
 /// One GPS point of the input. `label` is the DataFrame index label.
@@ -617,6 +827,8 @@ pub struct Pt {
     pub y: f64,
     pub speed: f64,
     pub bearing: f64,
+    /// The weight factor of the bearing, distance and air distance terms (`point_weights`; 1 = normal).
+    pub w: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -747,9 +959,9 @@ impl Matcher {
     }
 
     /// Add one point and match it. The label of the point is its position.
-    pub fn push(&mut self, x: f64, y: f64, speed: f64, bearing: f64) -> Result<Status, String> {
+    pub fn push(&mut self, x: f64, y: f64, speed: f64, bearing: f64, w: f64) -> Result<Status, String> {
         let label = self.pts.len() as i64;
-        self.pts.push(Pt { label, x, y, speed, bearing });
+        self.pts.push(Pt { label, x, y, speed, bearing, w });
         self.step(self.pts.len() - 1)?;
         Ok(self.status)
     }
@@ -943,8 +1155,9 @@ impl Matcher {
                 (last_len - lastoffset) + offset
             };
             let rd = (mrd - predict).abs();
-            let mut cost = if rev { 100000.0 } else { 0.0 };
-            cost += 1.0 * db + 30.0 * d + 10.0 * cost_air + 5.0 * rd;
+            let p = &self.p;
+            let mut cost = if rev { p.w_reverse } else { 0.0 };
+            cost += p.w_bearing * db * pt.w + p.w_dist * d * pt.w + p.w_air * cost_air * pt.w + p.w_road * rd;
             let new_item = if Some(e) == h.edge {
                 None
             } else {
