@@ -84,6 +84,15 @@ Also, `reset()` clears the path, and `match()` writes `new_sample.csv` and print
 
 **Equal results.** `test/test_rust_engine.py` runs both engines on trips of `data/gps_inside_island.zip`. On 400 trips (304,743 matched points), all four stages give the same rows. Each point gets the same edge, and the largest difference in a number is 4e-12. Each point of each trip has a match.
 
+### Smoothing only for short gaps (since 2026-11-21)
+
+`richdata` smooths the velocity (`alpha`) and rebuilds each point from the previous point + gap × smoothed velocity. Over a long gap this moved the point far from where it was measured: on the Monaco traces at 30 s, 41 m on average (up to 109 m), with GPS noise of only 3 m. Each interpolation then went through the moved points, not through the GPS points. Now `richdata(SMOOTH_MAX_GAP=2)` smooths only the steps of 2 s or less; after a longer gap a point keeps its GPS position. Data at 1 or 2 s gives the same result as before. `SMOOTH_MAX_GAP=None` gives the old behaviour.
+
+### Bezier interpolation fixed (2026-11-21)
+
+- `interpolateTrajectory` looped over `traj[1:-1]`, so it left out the last segment and never reached the last point. Now it interpolates to the last point (2 rows are enough).
+- The control points of the curve were at about 60-90 % of the gap at city speeds (a distance-based length multiplied by the speed again), so the curve made loops. Now the curve is a cubic Hermite curve: the control points are at gap time × velocity / 3 from the end points. On the Monaco traces at 30 s, the mean distance of the curve to the true route goes down from 25 m to 20 m.
+
 ### Road interpolation (since 2026-11-21)
 
 `interpolateTrajectory(traj, net=net)` puts the points of a long gap (`ROAD_MIN_GAP`, default 6 s or more) along the shortest road path between the two GPS points, at constant speed. The path starts and ends on one of the 3 nearest edges (within 50 m) of each GPS point. If the path is longer than `ROAD_DETOUR_FACTOR` (2) × the straight distance + `ROAD_DETOUR_M` (100 m), for example because of GPS noise, or if no path is found, the gap gets the Bezier curve. Shorter gaps and stops also get the Bezier curve. Without `net`, the function uses only the Bezier curve, as before.

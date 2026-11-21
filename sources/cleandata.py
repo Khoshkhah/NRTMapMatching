@@ -137,7 +137,11 @@ def removeOutlier(obs, MAX_SPEED_FOR_OUTLIER = 50):
 
 
 
-def smoothingPoint(obs, alpha=.7, type="local"): #type in {"local", "aggregated"}
+def smoothingPoint(obs, alpha=.7, type="local", max_gap=None): #type in {"local", "aggregated"}
+    # max_gap: smooth only the steps with a time gap of max_gap seconds or less. The smoothing rebuilds
+    # each point from the previous point + gap x smoothed velocity; over a long gap that moves the
+    # point far from its real position (at 30 s, 41 m on average on the Monaco traces). A long-gap
+    # step keeps its own velocity, so its point stays where it was measured. None = smooth all steps.
     
     df2 = obs.join(obs.shift(-1).rename(columns={"timestamp":"timestamp2","x":"x2","y":"y2"}))
     df2.at[df2.index[-1],"timestamp2"] = df2.iloc[-1]["timestamp"] + 1
@@ -145,8 +149,15 @@ def smoothingPoint(obs, alpha=.7, type="local"): #type in {"local", "aggregated"
     
     df2["vx"]=df2.apply(lambda row: (row.x2 - row.x)/row.dtime, axis =1)
     df2["vy"]=df2.apply(lambda row: (row.y2 - row.y)/row.dtime, axis =1)
-    df2["vx2"] = df2["vx"].ewm(alpha=alpha).mean()
-    df2["vy2"] = df2["vy"].ewm(alpha=alpha).mean()
+    if max_gap is None:
+        df2["vx2"] = df2["vx"].ewm(alpha=alpha).mean()
+        df2["vy2"] = df2["vy"].ewm(alpha=alpha).mean()
+    else:
+        # a long-gap step is a group of its own; the smoothing starts again after it
+        big = df2["dtime"] > max_gap
+        seg = (big | big.shift(1, fill_value=False)).cumsum()
+        df2["vx2"] = df2.groupby(seg)["vx"].transform(lambda s: s.ewm(alpha=alpha).mean())
+        df2["vy2"] = df2.groupby(seg)["vy"].transform(lambda s: s.ewm(alpha=alpha).mean())
     
     if type=="local":
         df2["new_x2"] = df2.apply(lambda row: row.x + row.dtime*row.vx2, axis =1)
@@ -172,16 +183,19 @@ def smoothingPoint(obs, alpha=.7, type="local"): #type in {"local", "aggregated"
 # 7 - assing stopindex and fix locations in stop cases
 
 def richdata(obs, net, id=0, alpha=.7, type="local", MIN_SPEED=1, MAX_SPEED_FOR_OUTLIER=50, MINSPEED_FOR_BEARING = 2,
-             engine=None):
+             engine=None, SMOOTH_MAX_GAP=2):
+    # SMOOTH_MAX_GAP: the smoothing (alpha) applies only to steps of SMOOTH_MAX_GAP seconds or less;
+    # after a longer gap a point keeps its GPS position (see smoothingPoint). None = smooth all steps.
     df = dfLonLat2XY(obs, net)
     if type == "local" and use_rust(engine):
         x, y, ts, speed, bearing, stop = rust.enrich(
             df["x"].tolist(), df["y"].tolist(), df["timestamp"].astype("int64").tolist(),
-            alpha, MIN_SPEED, MAX_SPEED_FOR_OUTLIER, MINSPEED_FOR_BEARING)
+            alpha, MIN_SPEED, MAX_SPEED_FOR_OUTLIER, MINSPEED_FOR_BEARING,
+            None if SMOOTH_MAX_GAP is None else float(SMOOTH_MAX_GAP))
         return pd.DataFrame({"id": id, "x": x, "y": y, "timestamp": ts, "speed": speed,
                              "bearing": bearing, "stopindex": stop})
     df1 = removeOutlier(df)
-    df2 = smoothingPoint(df1, alpha=alpha, type=type)
+    df2 = smoothingPoint(df1, alpha=alpha, type=type, max_gap=SMOOTH_MAX_GAP)
     
     output = []
     row_current = df2.iloc[0]
