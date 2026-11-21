@@ -439,18 +439,13 @@ fn bezier_segment(a: Knot, b: Knot, sr: f64, out: &mut Interp) {
         }
         return;
     }
-    let d = dist(a.p, b.p);
-    let va = [(a.speed + 1.0) * (a.bearing * std::f64::consts::PI / 180.0).sin(),
-              (a.speed + 1.0) * (a.bearing * std::f64::consts::PI / 180.0).cos()];
-    let vb = [(b.speed + 1.0) * (b.bearing * std::f64::consts::PI / 180.0).sin(),
-              (b.speed + 1.0) * (b.bearing * std::f64::consts::PI / 180.0).cos()];
-    let control = 10.0 + a.speed.max_py(b.speed).powf(1.2);
-    let sa = (a.speed + 1.0).sqrt();
-    let sb = (b.speed + 1.0).sqrt();
-    let alpha = ((0.5 * sa) / (sa + control)) * d * 3.0;
-    let beta = ((0.5 * sb) / (sb + control)) * d * 3.0;
-    let c0 = [a.p[0] + (alpha * va[0]) / 3.0, a.p[1] + (alpha * va[1]) / 3.0];
-    let c1 = [b.p[0] - (beta * vb[0]) / 3.0, b.p[1] - (beta * vb[1]) / 3.0];
+    // cubic Hermite curve as a Bezier: control points at gap time x velocity / 3 (see interpolation.py)
+    let ra = a.bearing * std::f64::consts::PI / 180.0;
+    let rb = b.bearing * std::f64::consts::PI / 180.0;
+    let va = [a.speed * ra.sin(), a.speed * ra.cos()];
+    let vb = [b.speed * rb.sin(), b.speed * rb.cos()];
+    let c0 = [a.p[0] + (dt * va[0]) / 3.0, a.p[1] + (dt * va[1]) / 3.0];
+    let c1 = [b.p[0] - (dt * vb[0]) / 3.0, b.p[1] - (dt * vb[1]) / 3.0];
     let mut time = 0.0;
     while time + a.ts <= b.ts {
         let t = time / dt;
@@ -473,20 +468,6 @@ fn bezier_segment(a: Knot, b: Knot, sr: f64, out: &mut Interp) {
     }
 }
 
-/// Python's `max(a, b)` for floats: `b` only when `b > a`.
-trait MaxPy {
-    fn max_py(self, o: f64) -> f64;
-}
-impl MaxPy for f64 {
-    fn max_py(self, o: f64) -> f64 {
-        if o > self {
-            o
-        } else {
-            self
-        }
-    }
-}
-
 /// `interpolateTrajectory(traj, sample_rate)`. The input needs 3 rows or more.
 #[allow(clippy::too_many_arguments)]
 pub fn interpolate(
@@ -502,7 +483,8 @@ pub fn interpolate(
     let n = x.len();
     let mut all = Interp::default();
     let mut a = k(0);
-    for i in 1..n - 1 {
+    // to the last point (the Python code had traj[1:-1], which left out the last segment)
+    for i in 1..n {
         let b = k(i);
         let start = all.x.len();
         bezier_segment(a, b, sr, &mut all);

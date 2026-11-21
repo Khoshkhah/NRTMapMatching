@@ -313,6 +313,22 @@ def test_sparse_points_keep_gps_position(data, tmp_path, monkeypatch, eng):
     assert shift(richdata(sparse.copy(), net, engine=eng, SMOOTH_MAX_GAP=None)) > 1.0
 
 
+@pytest.mark.parametrize("eng", ["python", "rust"])
+def test_bezier_reaches_each_point(data, tmp_path, monkeypatch, eng):
+    """The Bezier interpolation passes through each point of traj and ends at the last one
+    (before, it left out the last segment)."""
+    monkeypatch.chdir(tmp_path)
+    from cleandata import cleaningData
+    from interpolation import interpolateTrajectory
+    net, gps = data
+    s = gps[gps["trip_id_extended"] == "14010000510059476_0"].sort_values("timestamp").drop_duplicates()
+    c = cleaningData(s, net, engine="python").iloc[::10].reset_index(drop=True)
+    ip = interpolateTrajectory(c, engine=eng)
+    assert ip.timestamp.iloc[-1] == c.timestamp.iloc[-1]
+    at = {int(t): (x, y) for t, x, y in zip(ip.timestamp, ip.x, ip.y)}
+    assert all(np.hypot(at[int(t)][0] - x, at[int(t)][1] - y) < 1e-6 for t, x, y in zip(c.timestamp, c.x, c.y))
+
+
 def test_reset_quiet_no_file(data, tmp_path, monkeypatch, capsys):
     """reset() clears the path; match() writes no file and prints nothing (only with debug=True)."""
     monkeypatch.chdir(tmp_path)
