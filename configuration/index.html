@@ -795,10 +795,43 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#beam_width-default-5" class="md-nav__link">
+  <a href="#beam_width-default-20" class="md-nav__link">
     <span class="md-ellipsis">
       
-        BEAM_WIDTH (default: 5)
+        BEAM_WIDTH (default: 20)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#w_bearing-w_dist-w_air-w_road-w_reverse-defaults-1-30-10-5-100000" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W_BEARING, W_DIST, W_AIR, W_ROAD, W_REVERSE (defaults: 1, 30, 10, 5, 100000)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#interp_weight-default-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        INTERP_WEIGHT (default: 1)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#interpolatetrajectorytraj-sample_rate1-netnone-road_min_gap6-road_detour_factor2-road_detour_m100" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        interpolateTrajectory(traj, sample_rate=1, net=None, ROAD_MIN_GAP=6, ROAD_DETOUR_FACTOR=2, ROAD_DETOUR_M=100)
       
     </span>
   </a>
@@ -1295,10 +1328,43 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#beam_width-default-5" class="md-nav__link">
+  <a href="#beam_width-default-20" class="md-nav__link">
     <span class="md-ellipsis">
       
-        BEAM_WIDTH (default: 5)
+        BEAM_WIDTH (default: 20)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#w_bearing-w_dist-w_air-w_road-w_reverse-defaults-1-30-10-5-100000" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W_BEARING, W_DIST, W_AIR, W_ROAD, W_REVERSE (defaults: 1, 30, 10, 5, 100000)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#interp_weight-default-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        INTERP_WEIGHT (default: 1)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#interpolatetrajectorytraj-sample_rate1-netnone-road_min_gap6-road_detour_factor2-road_detour_m100" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        interpolateTrajectory(traj, sample_rate=1, net=None, ROAD_MIN_GAP=6, ROAD_DETOUR_FACTOR=2, ROAD_DETOUR_M=100)
       
     </span>
   </a>
@@ -1735,10 +1801,22 @@
 <ul>
 <li><strong>Note</strong>: Not used since the beam search (2026-11-21): the matcher does a fixed maximum of work for each point.</li>
 </ul>
-<h4 id="beam_width-default-5"><code>BEAM_WIDTH</code> (default: 5)<a class="headerlink" href="#beam_width-default-5" title="Permanent link">&para;</a></h4>
+<h4 id="beam_width-default-20"><code>BEAM_WIDTH</code> (default: 20)<a class="headerlink" href="#beam_width-default-20" title="Permanent link">&para;</a></h4>
 <ul>
 <li><strong>Type</strong>: int</li>
 <li><strong>Description</strong>: The number of hypotheses that the beam search keeps. 1 keeps only the best hypothesis (a greedy match).</li>
+</ul>
+<h4 id="w_bearing-w_dist-w_air-w_road-w_reverse-defaults-1-30-10-5-100000"><code>W_BEARING</code>, <code>W_DIST</code>, <code>W_AIR</code>, <code>W_ROAD</code>, <code>W_REVERSE</code> (defaults: 1, 30, 10, 5, 100000)<a class="headerlink" href="#w_bearing-w_dist-w_air-w_road-w_reverse-defaults-1-30-10-5-100000" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Description</strong>: The weights of the cost of a candidate edge: bearing error, distance to the edge, air distance error, road distance error, and the penalty for an edge in the reverse direction.</li>
+</ul>
+<h4 id="interp_weight-default-1"><code>INTERP_WEIGHT</code> (default: 1)<a class="headerlink" href="#interp_weight-default-1" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Description</strong>: The weight factor of a point in the middle of an interpolated gap (column <code>confidence</code> = 0). A point gets <code>INTERP_WEIGHT + (1 - INTERP_WEIGHT) × confidence</code> on its bearing, distance and air distance terms. 1 = all points have the same weight.</li>
+</ul>
+<h4 id="interpolatetrajectorytraj-sample_rate1-netnone-road_min_gap6-road_detour_factor2-road_detour_m100"><code>interpolateTrajectory(traj, sample_rate=1, net=None, ROAD_MIN_GAP=6, ROAD_DETOUR_FACTOR=2, ROAD_DETOUR_M=100)</code><a class="headerlink" href="#interpolatetrajectorytraj-sample_rate1-netnone-road_min_gap6-road_detour_factor2-road_detour_m100" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>net</strong>: with a <code>network.Net</code>, a gap of <code>ROAD_MIN_GAP</code> seconds or more goes along the shortest road path (road interpolation). A path longer than <code>ROAD_DETOUR_FACTOR</code> × the straight distance + <code>ROAD_DETOUR_M</code> gets the Bezier curve.</li>
 </ul>
 <h4 id="engine-default-none-and-debug-default-false"><code>engine</code> (default: None) and <code>debug</code> (default: False)<a class="headerlink" href="#engine-default-none-and-debug-default-false" title="Permanent link">&para;</a></h4>
 <ul>
