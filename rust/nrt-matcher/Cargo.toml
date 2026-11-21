@@ -1,0 +1,20 @@
+[package]
+name = "nrt-matcher"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Kaveh Khoshkhah"]
+description = "The Rust engine of the NRTMapMatching map matcher (cleaning, enrichment, Bezier interpolation, R-tree, MapMatcher)"
+
+[lib]
+# The Python module nrt_matcher. core.rs is plain Rust; lib.rs is the pyo3 binding.
+name = "nrt_matcher"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["abi3-py39", "extension-module"] }
+rstar = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

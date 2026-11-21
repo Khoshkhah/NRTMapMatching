@@ -54,6 +54,34 @@ if matcher.match(interpolated) == 1:
     route_match = matcher.save_routematch("route_match.csv")
 ```
 
+## Rust engine
+
+The crate `rust/nrt-matcher` is a Rust version of the map matching: `cleaningData`, `richdata`, `interpolateTrajectory`, the R-tree edge search and `MapMatcher.match`. The network model, the projection (pyproj), the file input and output, and `save_routematch` stay in Python.
+
+Build and install it into your Python environment (Rust and Python 3.9 or later are necessary):
+
+```bash
+pip install ./rust/nrt-matcher
+```
+
+The Python API does not change. When the module `nrt_matcher` is installed, the functions use it. Otherwise they use the Python code. To select the engine, set the argument `engine` (`"auto"`, `"rust"` or `"python"`) of these functions and of `MapMatcher`, or set the environment variable `NRT_ENGINE`.
+
+For online use, `nrt_matcher.Matcher.push(x, y, speed, bearing)` matches one new point and continues the match from the points before it (see `test/test_rust_engine.py`).
+
+**Equal results.** `test/test_rust_engine.py` runs both engines on trips of `data/gps_inside_island.zip`. On 400 trips (215,742 matched points), all four stages give the same rows. Each point gets the same edge, and the largest difference in a number is 4e-12. Both engines fail on the same 100 trips (an `IndexError` of the algorithm). At an exact cost tie (21 of the 400 trips), the Python code takes the first edge in a Python set, and that sequence can change from one run to the next. The Rust engine takes the edge with the lowest index. The test gives the Python code the same tie rule.
+
+**Speed** (`python test/bench_rust_engine.py 200`, Apple M6, 150 trips that match, 100,282 points at 1 s):
+
+| Stage | Python, ms per trip | Rust, ms per trip | Faster by |
+|---|---:|---:|---:|
+| `cleaningData` | 5.7 | 0.74 | 8× |
+| `richdata` | 14.3 | 1.8 | 8× |
+| `interpolateTrajectory` | 35.1 | 0.52 | 68× |
+| `MapMatcher.match` | 26.6 | 1.8 | 14× |
+| Rust matcher only (`Matcher.match_trace`) | | 0.075 | 355× |
+
+The time for each new point: Python 49 µs (the trace time divided by the points), Rust `push` 0.17 µs (median), 0.5 µs (p99). Most of the Rust time in `MapMatcher.match` is the file `new_sample.csv` that `match()` writes for each trace. In `cleaningData` and `richdata`, most of the Rust time is the pandas steps and the projection, which stay in Python.
+
 ## Documentation
 
 **Full documentation available at: [https://khoshkhah.github.io/NRTMapMatching](https://khoshkhah.github.io/NRTMapMatching)**
@@ -79,6 +107,7 @@ See `requirements.txt` for complete list.
 ```
 NRTMapMatching/
 ├── sources/          # Core modules
+├── rust/nrt-matcher/ # Rust engine of the map matching (Python module nrt_matcher)
 ├── docs/            # Documentation
 ├── test/            # Example notebooks
 └── data/            # Sample data

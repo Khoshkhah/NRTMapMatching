@@ -6,6 +6,26 @@ import time
 import network
 from network import combineShapesSumo,getGeoShape
 from geotools import distance2d,offsetBearing,polyLength,road_distance, polygonOffsetWithMinimumDistanceToPoint
+from engine import use_rust, rust
+
+
+def rust_network(net):
+    """The network as the Rust engine reads it (made one time for each Net). Edge index = position in net._edgeidlist."""
+    if getattr(net, "_rust_net", None) is None:
+        ids = net._edgeidlist
+        edge_index = {e: i for i, e in enumerate(ids)}
+        nodes = list(net.nodes.values())
+        node_index = {id(n): i for i, n in enumerate(nodes)}
+        edges = [net.edges[e] for e in ids]
+        net._rust_net = rust.Network(
+            [[(float(p[0]), float(p[1])) for p in e.shape] for e in edges],
+            [float(e.speed) for e in edges],
+            [node_index[id(e.fromnode)] for e in edges],
+            [node_index[id(e.tonode)] for e in edges],
+            [[edge_index[o.getID()] for o in n.outgoing] for n in nodes],
+            [[edge_index[o.getID()] for o in n.incoming] for n in nodes])
+        net._rust_edge_index = edge_index
+    return net._rust_net
 
 
 
@@ -19,7 +39,8 @@ class MapMatcher:
                  LOOP=True,
                  MAX_SPEED=100,
                  DIFF_GPS_ERROR=10,
-                 MAX_RUNNING_TIME=5):
+                 MAX_RUNNING_TIME=5,
+                 engine=None):
         
         if not isinstance(net, network.Net):
             raise ValueError("network.Net expected")
@@ -39,6 +60,7 @@ class MapMatcher:
         self.DIFF_GPS_ERROR = DIFF_GPS_ERROR #meters
         self.path= []  # item: {"edge":,"reverese":,"length":}
         self.MINSPEED_BEARING = 1 #m/s
+        self.engine = engine  # "auto", "rust" or "python"; see engine.py
         
         
     
@@ -172,6 +194,9 @@ class MapMatcher:
         if not isinstance(sample_gps, pd.DataFrame):
             return 0
         sample_gps.to_csv("new_sample.csv",index=False)
+        # the Python code has no MAP_ONE_WAY_FIX=False with LOOP=False (NameError): keep it there
+        if use_rust(self.engine) and (self.MAP_ONE_WAY_FIX or self.LOOP):
+            return self._match_rust(sample_gps)
         
         #initialpoint
         p = sample_gps.iloc[0]
@@ -494,6 +519,42 @@ class MapMatcher:
     
     
         
+    def _match_rust(self, sample_gps):
+        """match() with the Rust engine: the same matchdf and path as the Python code."""
+        rnet = rust_network(self.net)
+        ids = self.net._edgeidlist
+        index = self.net._rust_edge_index
+        m = rust.Matcher(rnet, self.MAX_GPS_ERROR, self.MAX_MAP_ERROR, self.MAP_ONE_WAY_FIX,
+                         self.U_TURN_ON_ONEWAY, self.LOOP, self.DIFF_GPS_ERROR,
+                         [(index[it["edge"].getID()], bool(it["reverse"]), float(it["length"])) for it in self.path])
+        try:
+            ok = m.match_trace(sample_gps.index.astype("int64").tolist(),
+                               sample_gps["x"].astype(float).tolist(), sample_gps["y"].astype(float).tolist(),
+                               sample_gps["speed"].astype(float).tolist(), sample_gps["bearing"].astype(float).tolist())
+        finally:
+            self.path = [{"edge": self.net.getEdge(ids[e]), "reverse": rev, "length": length}
+                         for e, rev, length in m.path()]
+        if not ok:
+            return 0
+        r = m.result()
+        if not r["pos"]:
+            self.matchdf = pd.DataFrame([])
+            return 1
+        rows = sample_gps.iloc[r["pos"]]
+        names = ("STAY", "CHANGE", "NODECISION")
+        self.matchdf = pd.DataFrame({
+            "index": r["label"], "timestamp": rows["timestamp"].to_numpy(), "x": r["x"], "y": r["y"],
+            "bearing": rows["bearing"].to_numpy(), "rd": r["rd"], "dist": r["dist"],
+            "from_edge": [ids[e] if e >= 0 else None for e in r["from_edge"]],
+            "predict_distance": r["predict_distance"], "speed": rows["speed"].to_numpy(),
+            "matched_road_distance": r["matched_road_distance"], "y_sample": rows["y"].to_numpy(),
+            "x_sample": rows["x"].to_numpy(), "cost_air": r["cost_air"],
+            "decitsion": [names[d] for d in r["decision"]], "matchbearing": r["matchbearing"],
+            "edgeid": [ids[e] for e in r["edge"]], "offset": r["offset"], "distbearing": r["distbearing"],
+            "edge_length": r["edge_length"], "type": rows["type"].to_numpy(),
+            "edge_reverse": r["edge_reverse"], "from_edge_reverse": r["from_edge_reverse"]})
+        return 1
+
     def save_routematch(self, routematchfile=None):
         """
         Saves the route matching results to a file and returns the route dataframe.
